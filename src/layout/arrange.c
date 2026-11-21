@@ -1243,6 +1243,7 @@ void pre_calculate_before_arrange(Monitor *m, bool want_animation,
 		}
 
 		if (!only_calculate && c->mon == m && c->ismaximizescreen &&
+			(!is_scroller_layout(m) || c->isfloating) &&
 			!c->animation.tagouted && !c->animation.tagouting &&
 			VISIBLEON(c, m)) {
 			reset_maximizescreen_size(c);
