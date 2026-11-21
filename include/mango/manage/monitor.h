@@ -25,6 +25,16 @@
 #define PERTAG_SLOTS (tag_num_MAX + 1)
 #endif
 
+/* Workspace camera in ordinary tag coordinates, independent of presentation
+ * zoom. One clock belongs to the output, never to individual windows. */
+typedef struct {
+	bool initialized, running, gesture, presenting;
+	double from, to, progress;
+	uint32_t started, duration;
+	double direct_span;
+	uint32_t source_tag, target_tag, travel_tags;
+} WorkspaceViewport;
+
 struct Monitor {
 	struct wl_list link;
 	struct wlr_output *wlr_output;
@@ -44,6 +54,7 @@ struct Monitor {
 	struct wl_list layers[4]; /* LayerSurface::link */
 	uint32_t seltags;
 	uint32_t tagset[2];
+	bool tag_gather_pending; /* Mode 2 retries only after motion settles. */
 	bool skiping_frame;
 	uint32_t resizing_count_pending;
 	uint32_t resizing_count_current;
@@ -82,6 +93,11 @@ struct Monitor {
 	struct wlr_ext_workspace_group_handle_v1 *ext_group;
 	bool iscleanuping;
 	int8_t carousel_anim_dir;
+	WindowGroup *window_groups[PERTAG_SLOTS];
+	WindowGroup *layout_group;
+	bool overview_input_blocked;
+	NiriOverview *niri_ov; /* niri-style overview state, NULL when closed */
+	WorkspaceViewport workspace_viewport;
 	bool vrr_global_enable;
 	bool is_vrr_enabling;
 	bool vrr_enable_failed;
@@ -128,6 +144,8 @@ bool is_overcircle_mode(const Monitor *m);
 void special_update_dim(Monitor *m);
 void special_sync_top_layer(bool special_active);
 uint32_t get_tag_status(uint32_t tag, Monitor *m);
+/* Mode 2 aliases all trailing empty tag numbers to the first empty slot. */
+uint32_t monitor_resolve_tag(const Monitor *m, uint32_t tag);
 uint32_t get_tags_first_tag_num(uint32_t source_tags);
 uint32_t get_tags_first_tag(uint32_t source_tags);
 void monitor_copy_tag_layout(Monitor *target, const Monitor *source,

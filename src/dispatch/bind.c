@@ -21,6 +21,7 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/overview/niri.h"
 #include "mango/overview/overview.h"
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,10 +38,22 @@
 #include <wlr/types/wlr_seat.h>
 #include <wordexp.h>
 
+/* All binding sources share the same window/layout command context. */
+int32_t dispatch_action(int32_t (*command)(const Arg *), const Arg *arg) {
+	return niri_overview_dispatch(command, arg) ? 0 : command(arg);
+}
+
 int32_t bind_to_view(const Arg *arg) {
 	if (!server.selected_monitor)
 		return 0;
 	uint32_t target = arg->ui;
+
+	if (server.selected_monitor->niri_ov) {
+		if (target & TAGMASK)
+			niri_overview_view_tag(server.selected_monitor,
+								   get_tags_first_tag_num(target & TAGMASK));
+		return 0;
+	}
 
 	if (config.view_current_to_back &&
 		server.selected_monitor->pertag->curtag &&
@@ -247,14 +260,6 @@ int32_t focus_direction(const Arg *arg) {
 
 	if (!server.selected_monitor)
 		return 0;
-
-	Client *sel = server.selected_monitor->sel;
-	if (is_monocle_layout(server.selected_monitor) && sel && !sel->isfloating &&
-		(arg->i == LEFT || arg->i == RIGHT)) {
-		Arg a = *arg;
-		a.i = (arg->i == LEFT) ? PREV : NEXT;
-		return focus_stack(&a);
-	}
 
 	Client *c = NULL;
 	c = direction_select(arg);
@@ -551,6 +556,9 @@ int32_t focus_stack(const Arg *arg) {
  */
 int32_t over_circle(const Arg *arg) {
 	if (!server.selected_monitor || server.grab_client)
+		return 0;
+
+	if (server.selected_monitor->niri_ov)
 		return 0;
 
 	Client *sel = arg->tc ? arg->tc : server.selected_monitor->sel;
@@ -1596,6 +1604,10 @@ int32_t tag_to_left(const Arg *arg) {
 		return 0;
 
 	Client *sel = arg->tc ? arg->tc : server.selected_monitor->sel;
+	if (server.selected_monitor->niri_ov) {
+		niri_overview_move_client_dir(server.selected_monitor, sel, -1);
+		return 0;
+	}
 	if (sel != NULL &&
 		__builtin_popcount(
 			server.selected_monitor->tagset[server.selected_monitor->seltags] &
@@ -1623,6 +1635,10 @@ int32_t tag_to_right(const Arg *arg) {
 		return 0;
 
 	Client *sel = arg->tc ? arg->tc : server.selected_monitor->sel;
+	if (server.selected_monitor->niri_ov) {
+		niri_overview_move_client_dir(server.selected_monitor, sel, 1);
+		return 0;
+	}
 	if (sel != NULL &&
 		__builtin_popcount(
 			server.selected_monitor->tagset[server.selected_monitor->seltags] &
@@ -2047,6 +2063,9 @@ bool view_shift_tag(const Arg *arg, int dir) {
 	if (!m)
 		return false;
 
+	if (m->niri_ov)
+		return niri_overview_focus_dir(m, dir);
+
 	if (m->isoverview || m->pertag->curtag == 0)
 		return false;
 
@@ -2070,7 +2089,8 @@ bool view_shift_tag(const Arg *arg, int dir) {
 		if (config.tag_carousel && cur >= last) {
 			target = 1;
 			wrapped = true;
-		} else if (!(target & TAGMASK)) {
+		} else if (!(target & TAGMASK) ||
+				   (config.tag_gather == 2 && cur >= last)) {
 			return false;
 		}
 	}
@@ -2091,6 +2111,9 @@ bool view_shift_tag(const Arg *arg, int dir) {
 bool view_shift_tag_have_client(const Arg *arg, int dir) {
 	if (!server.selected_monitor)
 		return false;
+
+	if (server.selected_monitor->niri_ov)
+		return niri_overview_focus_dir(server.selected_monitor, dir);
 
 	if (server.selected_monitor->isoverview ||
 		is_special_active(server.selected_monitor))
@@ -2200,6 +2223,8 @@ int32_t view_insert(const Arg *arg) {
 	config.tag_gather = 0;
 	client_switch_view(&(Arg){.ui = (1u << (target - 1)) & TAGMASK}, true);
 	config.tag_gather = tag_gather_bak;
+	if (config.tag_gather == 2)
+		arrange(server.selected_monitor, false, false);
 	return 0;
 }
 
@@ -2303,8 +2328,10 @@ int32_t zoom(const Arg *arg) {
 }
 
 int32_t setoption(const Arg *arg) {
+	int old_tag_num = config.tag_num;
 	parse_option(&config, arg->v, arg->v2, 0);
 	override_config();
+	reset_tag(old_tag_num);
 	reset_option();
 	return 0;
 }
@@ -2465,17 +2492,40 @@ static void set_overview(const Arg *arg, bool enter) {
 	return;
 }
 
+/* niri-style overview handles the plain overview; jump mode and overcircle
+ * keep the grid. */
+static bool want_niri_overview(Monitor *m) {
+	return niri_overview_enabled() && !m->is_jump_mode && !m->ov_tab_layout;
+}
+
 int32_t toggle_overview(const Arg *arg) {
 	if (!server.selected_monitor || server.grab_client)
 		return 0;
+
+	Monitor *m = server.selected_monitor;
+	if (m->niri_ov) {
+		niri_overview_toggle(m);
+		return 0;
+	}
+	if (!m->isoverview && want_niri_overview(m)) {
+		niri_overview_open(m);
+		return 0;
+	}
 
 	set_overview(arg, !server.selected_monitor->isoverview);
 	return 0;
 }
 
 int32_t enter_overview(const Arg *arg) {
-	if (!server.selected_monitor || server.grab_client ||
-		server.selected_monitor->isoverview)
+	if (!server.selected_monitor || server.grab_client)
+		return 0;
+
+	Monitor *m = server.selected_monitor;
+	if (m->niri_ov || (!m->isoverview && want_niri_overview(m))) {
+		niri_overview_open(m);
+		return 0;
+	}
+	if (server.selected_monitor->isoverview)
 		return 0;
 
 	set_overview(arg, true);
@@ -2483,8 +2533,14 @@ int32_t enter_overview(const Arg *arg) {
 }
 
 int32_t leave_overview(const Arg *arg) {
-	if (!server.selected_monitor || server.grab_client ||
-		!server.selected_monitor->isoverview)
+	if (!server.selected_monitor || server.grab_client)
+		return 0;
+
+	if (server.selected_monitor->niri_ov) {
+		niri_overview_close(server.selected_monitor, 0);
+		return 0;
+	}
+	if (!server.selected_monitor->isoverview)
 		return 0;
 
 	set_overview(arg, false);

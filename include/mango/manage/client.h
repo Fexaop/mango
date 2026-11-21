@@ -51,10 +51,8 @@ enum { UP, DOWN, LEFT, RIGHT, UNDIR, ALLDIR }; /* smartmovewin */
 #define ISFAKETILED(A)                                                         \
 	(A && !(A)->isfloating && !(A)->isminimized && !(A)->iskilling &&          \
 	 !(A)->isunglobal)
-#define VISIBLEON(C, M)                                                        \
-	((C) && (M) && (C)->mon == (M) && !(C)->isminimized &&                     \
-	 (((C)->tags & (M)->tagset[(M)->seltags] || (C)->isglobal ||               \
-	   (C)->isunglobal)))
+bool window_group_visible(const Client *c, const Monitor *m);
+#define VISIBLEON(C, M) window_group_visible((C), (M))
 #define TAGMATCH(C, M)                                                         \
 	((C) && (M) && (C)->mon == (M) && !(C)->isminimized &&                     \
 	 (((C)->tags & (M)->tagset[(M)->seltags])))
@@ -139,6 +137,17 @@ struct Client {
 	struct wlr_scene_tree *ov_card_tree; /* Overview card tree (root surface
 											plus all subsurface nodes). */
 	struct wl_list ov_card_surfaces;	 /* struct ov_card_surface list */
+	/* Render-only overview transform. Native window geometry and flags
+	 * remain authoritative; niri_tag selects the tag-backed group. */
+	struct wlr_box niri_preview_geom;
+	uint32_t niri_preview_bw;
+	uint32_t niri_tag;
+	/* niri overview card move animation (relayout / drop). */
+	struct wlr_box niri_target_geom; /* Last native target seen by rendering. */
+	uint32_t niri_target_tag;
+	struct wlr_box niri_move_from;
+	uint32_t niri_move_started;
+	bool niri_move_running;
 
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener foreign_activate_request;
@@ -408,6 +417,7 @@ bool client_set_monitor_adapted(Client *c, Monitor *m, uint32_t newtags,
 								bool focus);
 void client_change_mon(Client *c, Monitor *m);
 void view_insert_shift_tags(Monitor *m, uint32_t target);
+void view_insert_shift_tags_until(Monitor *m, uint32_t target, uint32_t empty);
 void client_set_floating(Client *c, int32_t floating, bool want_animation);
 void client_set_fullscreen(Client *c, int32_t fullscreen, bool rearrange);
 void client_set_fake_fullscreen(Client *c, int32_t fakefullscreen);
@@ -430,6 +440,7 @@ void apply_named_scratchpad(Client *target_client);
 void client_update_border_color(Client *c);
 void client_add_dim_node(Client *c);
 void client_exchange(Client *c1, Client *c2);
+void client_exchange_default(Client *c1, Client *c2);
 void client_replace(Client *c, Client *w, bool is_group_change_member,
 					bool is_swallow);
 bool client_jump_to_monitor(Client *c, Monitor *m, int32_t dir);

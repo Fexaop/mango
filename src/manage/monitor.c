@@ -2,6 +2,7 @@
 #include "mango/animation/client.h"
 #include "mango/animation/common.h"
 #include "mango/animation/layer.h"
+#include "mango/animation/tag.h"
 #include "mango/common/log.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
@@ -21,7 +22,9 @@
 #include "mango/manage/client.h"
 #include "mango/manage/layer.h"
 #include "mango/manage/misc.h"
+#include "mango/manage/window-group.h"
 #include "mango/manage/xwayland_primary.h"
+#include "mango/overview/niri.h"
 #include <fcntl.h>
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <scenefx/types/wlr_scene.h>
@@ -189,6 +192,28 @@ uint32_t get_tag_status(uint32_t tag, Monitor *m) {
 		}
 	}
 	return status;
+}
+
+uint32_t monitor_resolve_tag(const Monitor *m, uint32_t tag) {
+	if (!m || config.tag_gather != 2 || tag < 1 ||
+		tag > (uint32_t)config.tag_num)
+		return tag;
+	/* A retained active empty workspace is still the same workspace until
+	 * the user leaves; internal edits must not redirect it to another slot. */
+	if (m->tagset[m->seltags] == (1u << (tag - 1)))
+		return tag;
+
+	uint32_t occupied = 0;
+	Client *c;
+	wl_list_for_each(c, &server.clients, link) {
+		if (c->mon == m && !c->iskilling && !(c->tags & TAG0_MASK))
+			occupied |= c->tags & TAGMASK;
+	}
+	uint32_t last = (uint32_t)config.tag_num;
+	while (last && !(occupied & (1u << (last - 1))))
+		last--;
+	uint32_t empty = MANGO_MIN(last + 1, (uint32_t)config.tag_num);
+	return MANGO_MIN(tag, empty);
 }
 
 uint32_t get_tags_first_tag_num(uint32_t source_tags) {
@@ -902,6 +927,7 @@ void handle_output_destroy(struct wl_listener *listener, void *data) {
 	uint32_t i;
 
 	m->iscleanuping = true;
+	m->tag_gather_pending = false;
 
 	Client *c, *ctmp;
 	wl_list_for_each_safe(c, ctmp, &server.fadeout_clients, fadeout_link) {
@@ -966,6 +992,7 @@ void handle_output_destroy(struct wl_listener *listener, void *data) {
 	wlr_color_transform_unref(m->icc_transform);
 	m->icc_transform = NULL;
 	wlr_output_state_finish(&m->pending);
+	window_groups_destroy(m);
 	free(m->pertag);
 	free(m);
 }
@@ -977,13 +1004,16 @@ void monitor_close(Monitor *m) {
 	 * move closed monitor's clients to the focused one */
 	Client *c = NULL;
 	int32_t nmons = wl_list_length(&server.monitors);
+	m->tag_gather_pending = false;
 
 	if (server.gesture_drive_mon == m) {
 		server.gesture_drive_active = false;
 		server.gesture_drive_mon = NULL;
 	}
 
-	if (m->isoverview) {
+	if (m->niri_ov) {
+		niri_overview_destroy(m);
+	} else if (m->isoverview) {
 		toggle_overview(&(Arg){0});
 	}
 
@@ -1421,6 +1451,12 @@ void handle_output_frame(struct wl_listener *listener, void *data) {
 			client_is_rendered_on_mon(c, m))
 			resizing_on_this_mon = true;
 	}
+	need_more_frames = workspace_viewport_draw_frame(m) || need_more_frames;
+
+	/* Runs after the client pass: the niri overview places every card. */
+	need_more_frames = niri_overview_draw_frame(m) || need_more_frames;
+	if (m->tag_gather_pending && !m->niri_ov)
+		tag_gather_apply(m);
 
 	if (!config.animations && !server.grab_client && !need_more_frames &&
 		resizing_on_this_mon) {

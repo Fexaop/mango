@@ -11,6 +11,7 @@
 #include "mango/manage/client.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
+#include "mango/overview/niri.h"
 #include "mango/switcher/switcher.h"
 #include <wlr/backend/libinput.h>
 #include <wlr/interfaces/wlr_keyboard.h>
@@ -590,6 +591,7 @@ int32_t keyboard_check_keybinding(uint32_t state, bool is_locked, uint32_t mods,
 	 * own processing.
 	 */
 	int32_t handled = 0;
+	bool matched = false;
 	const KeyBinding *k;
 	int32_t ji;
 
@@ -632,6 +634,7 @@ int32_t keyboard_check_keybinding(uint32_t state, bool is_locked, uint32_t mods,
 			   keycode == k->keysymcode.keycode.keycode2 ||
 			   keycode == k->keysymcode.keycode.keycode3))) &&
 			k->func) {
+			matched = true;
 
 			if (!k->ispassapply) {
 				handled = 1;
@@ -642,12 +645,33 @@ int32_t keyboard_check_keybinding(uint32_t state, bool is_locked, uint32_t mods,
 				handled = 0;
 			}
 
-			if (k->func(&k->arg))
+			if (dispatch_action(k->func, &k->arg))
 				break;
 
 			// only match the first keybind
 			if (!k->isallowconflict)
 				break;
+		}
+	}
+	/* Bare arrows navigate the overview without becoming global application
+	 * shortcuts. Explicit user bindings still take precedence. */
+	Monitor *m = server.selected_monitor;
+	if (!matched && !is_locked && !server.session_locked &&
+		CLEANMASK(mods) == 0 && niri_overview_active(m) && !m->is_jump_mode) {
+		int direction =
+			sym == XKB_KEY_Up
+				? UP
+				: (sym == XKB_KEY_Down
+					   ? DOWN
+					   : (sym == XKB_KEY_Left
+							  ? LEFT
+							  : (sym == XKB_KEY_Right ? RIGHT : UNDIR)));
+		if (direction != UNDIR) {
+			if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+				keyboard_mark_bound_key(keycode);
+				dispatch_action(focus_direction, &(Arg){.i = direction});
+			}
+			handled = 1;
 		}
 	}
 	return handled;
@@ -724,7 +748,10 @@ void handle_keyboard_key(struct wl_listener *listener, void *data) {
 	// In overcircle mode, releasing the mode key exits overview.
 	if (server.selected_monitor && server.selected_monitor->ov_tab_layout &&
 		!server.selected_monitor->is_jump_mode &&
-		server.selected_monitor->isoverview && server.selected_monitor->sel &&
+		(server.selected_monitor->niri_ov
+			 ? server.selected_monitor->overview_input_blocked
+			 : server.selected_monitor->isoverview) &&
+		server.selected_monitor->sel &&
 		!server.session_locked && !group->virtual_keyboard &&
 		event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
 		ISMODEKEYCODE(keycode)) {

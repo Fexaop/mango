@@ -106,3 +106,32 @@ Control the direction of tag switch animations.
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `tag_animation_direction` | `1` | Tag animation direction (1: horizontal, 0: vertical) |
+| `tag_animation_continuous` | `0` | Animate direct jumps through intermediate tags (0: disable, 1: enable) |
+
+Enable continuous workspace travel with:
+
+```ini
+tag_animation_continuous=1
+```
+
+A jump from workspace 1 to 3 slides through workspace 2, including when it is
+empty; the reverse jump travels through 3, 2, 1. The entire transition uses
+`animation_duration_tag` and follows `tag_animation_direction`. Focus and the
+active tag change directly to the requested destination.
+
+Workspace travel and overview zoom have separate timelines. Opening overview
+does not snap to the destination or restart `animation_duration_tag`; closing or
+reopening it also preserves the current workspace position and switch deadline.
+Closing a window or recalculating its layout does not start another workspace
+transition. Operations during travel use the requested destination's native
+layout; new windows are never configured to the scaled preview size.
+
+With `tag_gather=2`, active empty workspaces remain in place. Removing an empty
+slot after departure waits for workspace travel, overview zoom, window
+animations, and interactions to finish, then renumbers around the focused
+workspace without moving it on screen.
+
+This applies to ordinary single-tag views with animations enabled. Multi-tag
+views, special workspaces, and carousel wraparound keep their existing
+transitions. Niri-style overview already travels through intermediate workspaces
+independently of this option.

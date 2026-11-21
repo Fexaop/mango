@@ -31,6 +31,7 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/overview/niri.h"
 #include "mango/switcher/switcher.h"
 #include <scenefx/types/wlr_scene.h>
 #include <unistd.h>
@@ -73,6 +74,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		config->animation_fade_out = atoi(value);
 	} else if (strcmp(key, "tag_animation_direction") == 0) {
 		config->tag_animation_direction = atoi(value);
+	} else if (strcmp(key, "tag_animation_continuous") == 0) {
+		config->tag_animation_continuous = atoi(value);
 	} else if (strcmp(key, "zoom_initial_ratio") == 0) {
 		config->zoom_initial_ratio = atof(value);
 	} else if (strcmp(key, "zoom_end_ratio") == 0) {
@@ -502,6 +505,42 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		config->overviewgappo = atoi(value);
 	} else if (strcmp(key, "overcircle_center_ratio") == 0) {
 		config->overcircle_center_ratio = atof(value);
+	} else if (strcmp(key, "overview_style") == 0) {
+		config->overview_style = atoi(value);
+	} else if (strcmp(key, "overview_zoom") == 0) {
+		config->overview_zoom = atof(value);
+	} else if (strcmp(key, "overview_backdrop_color") == 0) {
+		int64_t color = parse_color(value);
+		if (color == -1) {
+			mango_error(false, WLR_ERROR,
+						"Invalid overview_backdrop_color "
+						"format: \033[1m\033[31m%s\033[0m\n",
+						value);
+			return false;
+		} else {
+			convert_hex_to_rgba(config->overview_backdrop_color, color);
+		}
+	} else if (strcmp(key, "overview_workspace_shadow") == 0) {
+		config->overview_workspace_shadow = atoi(value);
+	} else if (strcmp(key, "overview_workspace_shadow_softness") == 0) {
+		config->overview_workspace_shadow_softness = atoi(value);
+	} else if (strcmp(key, "overview_workspace_shadow_spread") == 0) {
+		config->overview_workspace_shadow_spread = atoi(value);
+	} else if (strcmp(key, "overview_workspace_shadow_offset_x") == 0) {
+		config->overview_workspace_shadow_offset_x = atoi(value);
+	} else if (strcmp(key, "overview_workspace_shadow_offset_y") == 0) {
+		config->overview_workspace_shadow_offset_y = atoi(value);
+	} else if (strcmp(key, "overview_workspace_shadow_color") == 0) {
+		int64_t color = parse_color(value);
+		if (color == -1) {
+			mango_error(false, WLR_ERROR,
+						"Invalid overview_workspace_shadow_color "
+						"format: \033[1m\033[31m%s\033[0m\n",
+						value);
+			return false;
+		} else {
+			convert_hex_to_rgba(config->overview_workspace_shadow_color, color);
+		}
 	} else if (strcmp(key, "jump_labels") == 0) {
 		if (config->jump_labels)
 			free(config->jump_labels);
@@ -1390,6 +1429,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 					rule->no_animation = CLAMP_INT(atoi(val), 0, 1);
 				} else if (strcmp(key, "no_shadow") == 0) {
 					rule->no_shadow = CLAMP_INT(atoi(val), 0, 1);
+				} else if (strcmp(key, "place_within_backdrop") == 0) {
+					rule->place_within_backdrop = CLAMP_INT(atoi(val), 0, 1);
 				} else {
 					mango_error(false, WLR_ERROR,
 								"Unknown "
@@ -2385,13 +2426,14 @@ void set_value_default() {
 	config.animation_fade_in = 1;
 	config.animation_fade_out = 1;
 	config.tag_animation_direction = HORIZONTAL;
+	config.tag_animation_continuous = 0;
 	config.zoom_initial_ratio = 0.4f;
 	config.zoom_end_ratio = 0.8f;
 	config.fadein_begin_opacity = 0.5f;
 	config.fadeout_begin_opacity = 0.5f;
 	config.animation_duration_move = 500;
 	config.animation_duration_open = 400;
-	config.animation_duration_tag = 300;
+	config.animation_duration_tag = 500;
 	config.animation_duration_close = 300;
 	config.animation_duration_focus = 0;
 
@@ -2502,6 +2544,23 @@ void set_value_default() {
 	config.overviewgappi = 5;
 	config.overviewgappo = 30;
 	config.overcircle_center_ratio = 0.5f;
+	/* niri overview defaults (niri-config: zoom 0.5, backdrop #262626,
+	 * workspace-shadow softness 40 spread 10 offset 0,10 color #00000050). */
+	config.overview_style = OVERVIEW_STYLE_GRID;
+	config.overview_zoom = 0.5f;
+	config.overview_backdrop_color[0] = 0x26 / 255.0f;
+	config.overview_backdrop_color[1] = 0x26 / 255.0f;
+	config.overview_backdrop_color[2] = 0x26 / 255.0f;
+	config.overview_backdrop_color[3] = 1.0f;
+	config.overview_workspace_shadow = 1;
+	config.overview_workspace_shadow_softness = 40;
+	config.overview_workspace_shadow_spread = 10;
+	config.overview_workspace_shadow_offset_x = 0;
+	config.overview_workspace_shadow_offset_y = 10;
+	config.overview_workspace_shadow_color[0] = 0.0f;
+	config.overview_workspace_shadow_color[1] = 0.0f;
+	config.overview_workspace_shadow_color[2] = 0.0f;
+	config.overview_workspace_shadow_color[3] = 0x50 / 255.0f;
 	config.cursor_hide_timeout = 0;
 	config.cursor_hide_on_keypress = 0;
 
@@ -2732,6 +2791,8 @@ void override_config(void) {
 	config.layer_animations = CLAMP_INT(config.layer_animations, 0, 1);
 	config.tag_animation_direction =
 		CLAMP_INT(config.tag_animation_direction, 0, 1);
+	config.tag_animation_continuous =
+		CLAMP_INT(config.tag_animation_continuous, 0, 1);
 	config.animation_fade_in = CLAMP_INT(config.animation_fade_in, 0, 1);
 	config.animation_fade_out = CLAMP_INT(config.animation_fade_out, 0, 1);
 	config.zoom_initial_ratio =
@@ -2771,7 +2832,7 @@ void override_config(void) {
 	config.default_mfact = CLAMP_FLOAT(config.default_mfact, 0.1f, 0.9f);
 	config.default_nmaster = CLAMP_INT(config.default_nmaster, 1, 1000);
 	config.tag_num = CLAMP_INT(config.tag_num, 1, tag_num_MAX);
-	config.tag_gather = CLAMP_INT(config.tag_gather, 0, 1);
+	config.tag_gather = CLAMP_INT(config.tag_gather, 0, 2);
 	config.center_master_overspread =
 		CLAMP_INT(config.center_master_overspread, 0, 1);
 	config.center_when_single_stack =
@@ -2797,6 +2858,18 @@ void override_config(void) {
 	config.overviewgappo = CLAMP_INT(config.overviewgappo, 0, 1000);
 	config.overcircle_center_ratio =
 		CLAMP_FLOAT(config.overcircle_center_ratio, 0.1f, 0.9f);
+	config.overview_style = CLAMP_INT(config.overview_style, 0, 1);
+	config.overview_zoom = CLAMP_FLOAT(config.overview_zoom, 0.0001f, 0.75f);
+	config.overview_workspace_shadow =
+		CLAMP_INT(config.overview_workspace_shadow, 0, 1);
+	config.overview_workspace_shadow_softness =
+		CLAMP_INT(config.overview_workspace_shadow_softness, 0, 1000);
+	config.overview_workspace_shadow_spread =
+		CLAMP_INT(config.overview_workspace_shadow_spread, 0, 1000);
+	config.overview_workspace_shadow_offset_x =
+		CLAMP_INT(config.overview_workspace_shadow_offset_x, -1000, 1000);
+	config.overview_workspace_shadow_offset_y =
+		CLAMP_INT(config.overview_workspace_shadow_offset_y, -1000, 1000);
 	config.xwayland_persistence = CLAMP_INT(config.xwayland_persistence, 0, 1);
 	config.xwayland_ignore_scale =
 		CLAMP_INT(config.xwayland_ignore_scale, 0, 1);

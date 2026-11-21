@@ -217,6 +217,7 @@ typedef struct {
 	int32_t no_blur;
 	int32_t no_animation;
 	int32_t no_shadow;
+	int32_t place_within_backdrop;
 } ConfigLayerRule;
 
 typedef struct {
@@ -315,6 +316,7 @@ typedef struct {
 	int32_t animation_fade_in;
 	int32_t animation_fade_out;
 	int32_t tag_animation_direction;
+	int32_t tag_animation_continuous;
 	float zoom_initial_ratio;
 	float zoom_end_ratio;
 	float fadein_begin_opacity;
@@ -375,7 +377,7 @@ typedef struct {
 	float default_mfact;
 	uint32_t default_nmaster;
 	int32_t tag_num;	// Configurable tag count, range 1..tag_num_MAX.
-	int32_t tag_gather; // Compact tags to remove gaps
+	int32_t tag_gather; // 0: fixed, 1: gather, 2: gather after motion settles.
 	int32_t center_master_overspread;
 	int32_t center_when_single_stack;
 
@@ -397,6 +399,15 @@ typedef struct {
 	int32_t overviewgappi;
 	int32_t overviewgappo;
 	float overcircle_center_ratio;
+	int32_t overview_style;
+	float overview_zoom;
+	float overview_backdrop_color[4];
+	int32_t overview_workspace_shadow;
+	int32_t overview_workspace_shadow_softness;
+	int32_t overview_workspace_shadow_spread;
+	int32_t overview_workspace_shadow_offset_x;
+	int32_t overview_workspace_shadow_offset_y;
+	float overview_workspace_shadow_color[4];
 	char *jump_labels;
 	uint32_t cursor_hide_timeout;
 	uint32_t cursor_hide_on_keypress;

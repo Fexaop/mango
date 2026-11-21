@@ -19,6 +19,19 @@
 /* Maps the wlr_layer_shell layer enum to scene layers. */
 static const int32_t layermap[] = {LyrBg, LyrBottom, LyrTop, LyrSpecialOverlay};
 
+/* Use the existing layer scene directly, behind overview cards only. */
+static void layer_place_backdrop(LayerSurface *l) {
+	if (!l->place_within_backdrop)
+		return;
+	if (l->scene->node.parent != server.layers[LyrOverview]) {
+		wlr_scene_node_reparent(&l->scene->node, server.layers[LyrOverview]);
+		wlr_scene_node_lower_to_bottom(&l->scene->node);
+	}
+	mango_scene_node_set_ignore_hit(&l->scene->node, true);
+	wlr_scene_node_set_enabled(&l->scene->node,
+		l->mon->niri_ov && l->layer_surface->surface->mapped);
+}
+
 void arrange_layer(Monitor *m, struct wl_list *list,
 				   struct wlr_box *usable_area, int32_t exclusive) {
 	LayerSurface *l = NULL;
@@ -215,6 +228,7 @@ void handle_layer_surface_map(struct wl_listener *listener, void *data) {
 	l->dirty = false;
 	l->shield_when_capture = false;
 	l->no_blur = 0;
+	l->place_within_backdrop = 0;
 	l->shadow = NULL;
 	l->need_output_flush = true;
 	l->animation_type_open = ANIM_TYPE_UNSET;
@@ -230,10 +244,15 @@ void handle_layer_surface_map(struct wl_listener *listener, void *data) {
 			APPLY_INT_PROP(l, r, no_blur);
 			APPLY_INT_PROP(l, r, no_animation);
 			APPLY_INT_PROP(l, r, no_shadow);
+			APPLY_INT_PROP(l, r, place_within_backdrop);
 			APPLY_INT_PROP(l, r, animation_type_open);
 			APPLY_INT_PROP(l, r, animation_type_close);
 		}
 	}
+	if (layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND)
+		l->place_within_backdrop = 0;
+	if (l->place_within_backdrop)
+		l->no_animation = 1;
 
 	// Initializes the shield.
 	l->shield =
@@ -270,6 +289,7 @@ void handle_layer_surface_map(struct wl_listener *listener, void *data) {
 	// exclusive surface.
 	arrange_layers(l->mon);
 	reset_exclusive_layers_focus(l->mon);
+	layer_place_backdrop(l);
 	printstatus(IPC_WATCH_LAST_OPEN_SURFACE);
 }
 
@@ -316,6 +336,7 @@ void handle_layer_surface_commit(struct wl_listener *listener, void *data) {
 	} else {
 		wlr_scene_node_set_enabled(&l->scene->node, true);
 	}
+	layer_place_backdrop(l);
 
 	get_layer_target_geometry(l, &box);
 
@@ -373,6 +394,7 @@ void handle_layer_surface_commit(struct wl_listener *listener, void *data) {
 					 : scene_layer));
 		}
 	}
+	layer_place_backdrop(l);
 
 	arrange_layers(l->mon);
 

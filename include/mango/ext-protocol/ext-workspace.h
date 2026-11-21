@@ -23,7 +23,6 @@ void toggle_workspace(struct workspace *target);
 const char *get_name_from_tag(uint32_t tag);
 void destroy_workspace(struct workspace *workspace);
 void cleanup_workspaces_by_monitor(Monitor *m);
-void remove_workspace_by_tag(uint32_t tag, Monitor *m);
 void add_workspace_by_tag(int32_t tag, Monitor *m);
 void mango_ext_workspace_printstatus(Monitor *m);
 void refresh_monitors_workspaces_status(Monitor *m);

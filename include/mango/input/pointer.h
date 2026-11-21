@@ -37,6 +37,8 @@ void toggle_hotarea(int32_t x_root, int32_t y_root);
 void // Mouse scroll wheel event
 handle_cursor_axis(struct wl_listener *listener, void *data);
 Client *find_closest_tiled_client(Client *c);
+void pointer_begin_drag_tile(Client *c);
+bool pointer_update_grab(void);
 void pointer_place_drag_tile(Client *c);
 void // Mouse button event
 handle_cursor_button(struct wl_listener *listener, void *data);

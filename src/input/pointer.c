@@ -19,6 +19,7 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/overview/niri.h"
 #include "mango/switcher/switcher.h"
 #include <scenefx/types/wlr_scene.h>
 #include <wlr/backend/libinput.h>
@@ -49,6 +50,47 @@ static double pointer_surface_scale(Client *c) {
 	}
 #endif
 	return 1.0;
+}
+
+static bool pointer_overview_input_active(const Monitor *m) {
+	return m && (m->niri_ov ? m->overview_input_blocked : m->isoverview);
+}
+
+/* Closing overview is only a projection. Pick and address applications in
+ * their native target-workspace geometry, never the transient card boxes. */
+static void pointer_node_at(double x, double y, struct wlr_surface **surface,
+							Client **client, MangoBarDecoration **bar,
+							double *sx, double *sy) {
+	Client *c = NULL;
+	LayerSurface *l = NULL;
+	node_at_point(x, y, surface, &c, &l, bar, sx, sy);
+	Monitor *m = monitor_at_point(x, y);
+	if (!server.session_locked && m && m->niri_ov && !m->overview_input_blocked &&
+		!(l && l->layer_surface &&
+		  l->layer_surface->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP)) {
+		c = NULL;
+		*surface = NULL;
+		if (bar)
+			*bar = NULL;
+		Client *candidate;
+		wl_list_for_each(candidate, &server.focus_stack, flink) {
+			struct wlr_box g = candidate->geom;
+			if (candidate->mon != m || candidate->iskilling ||
+				!VISIBLEON(candidate, m) || !client_surface(candidate)->mapped ||
+				x < g.x || y < g.y || x >= g.x + g.width ||
+				y >= g.y + g.height)
+				continue;
+			c = candidate;
+			*surface = client_surface(c);
+			if (sx)
+				*sx = x - g.x - c->bw;
+			if (sy)
+				*sy = y - g.y - c->bw;
+			break;
+		}
+	}
+	if (client)
+		*client = c;
 }
 
 static void
@@ -172,8 +214,8 @@ static bool pointer_node_enabled(struct wlr_scene_node *node) {
 }
 
 static bool pointer_client_visible(Client *c) {
-	return c && c->mon && !c->mon->isoverview && client_surface(c)->mapped &&
-		   VISIBLEON(c, c->mon);
+	return c && c->mon && !pointer_overview_input_active(c->mon) &&
+		   client_surface(c)->mapped && VISIBLEON(c, c->mon);
 }
 
 static Client *confine_pointer_last = NULL;
@@ -192,7 +234,8 @@ static Client *pointer_confine_rule_client(void) {
 	}
 
 	if (!c || !c->confine_pointer || !client_surface(c)->mapped || !c->mon ||
-		c->mon->isoverview || c->isminimized || !VISIBLEON(c, c->mon) ||
+		pointer_overview_input_active(c->mon) || c->isminimized ||
+		!VISIBLEON(c, c->mon) ||
 		!pointer_node_enabled(&c->scene->node)) {
 		return NULL;
 	}
@@ -234,7 +277,7 @@ static bool pointer_constraint_surface_visible(
 static void
 pointer_warp_into_constraint(struct wlr_pointer_constraint_v1 *constraint,
 							 Client *c) {
-	if (!c || !c->mon || c->mon->isoverview ||
+	if (!c || !c->mon || pointer_overview_input_active(c->mon) ||
 		!pointer_constraint_surface_visible(constraint)) {
 		return;
 	}
@@ -422,6 +465,16 @@ handle_cursor_axis(struct wl_listener *listener, void *data) {
 
 	mods = keyboard_hard_modifiers();
 
+	/* niri overview: the wheel switches workspaces, no modifier needed. */
+	if (!mods) {
+		Monitor *am = monitor_at_point(server.cursor->x, server.cursor->y);
+		if (am && am->overview_input_blocked && am->niri_ov &&
+			niri_overview_axis(
+				am, event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL,
+				event->delta, event->delta_discrete, event->time_msec))
+			return;
+	}
+
 	if (event->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL)
 		adir = event->delta > 0 ? AxisDown : AxisUp;
 	else
@@ -441,7 +494,7 @@ handle_cursor_axis(struct wl_listener *listener, void *data) {
 			if (event->time_msec - server.axis_apply_time >
 					config.axis_bind_apply_timeout ||
 				server.axis_apply_dir * event->delta < 0) {
-				a->func(&a->arg);
+				dispatch_action(a->func, &a->arg);
 				server.axis_apply_time = event->time_msec;
 				server.axis_apply_dir = event->delta > 0 ? 1 : -1;
 				return; // If matched, do not forward this scroll event to the
@@ -864,7 +917,8 @@ static uint32_t client_resize_edge_at(Client *c, struct wlr_surface *surface,
 	 * must keep receiving its own input instead of resizing the parent. */
 	if (surface && surface != client_surface(c))
 		return 0;
-	if (!c->mon || c->mon->isoverview || !VISIBLEON(c, c->mon))
+	if (!c->mon || pointer_overview_input_active(c->mon) ||
+		!VISIBLEON(c, c->mon))
 		return 0;
 
 	int32_t t = client_resize_grab(c);
@@ -986,7 +1040,7 @@ void pointer_resize_floating_window(Client *gc, double x, double y) {
 	server.grab_offset_y += cdy;
 }
 
-static void client_begin_drag_float(Client *c) {
+void pointer_begin_drag_tile(Client *c) {
 	c->drag_to_tile = true;
 	exit_scroller_stack(c);
 	client_set_floating(c, 1, false);
@@ -1011,7 +1065,7 @@ bool pointer_begin_move_resize(Client *gc, uint32_t mode, double x, double y,
 	server.grab_is_border_resize = edge != 0;
 
 	if (gc->isfloating == 0 && mode == CurMove)
-		client_begin_drag_float(gc);
+		pointer_begin_drag_tile(gc);
 
 	if (gc->drag_to_tile && config.drag_tile_to_tile &&
 		config.drag_tile_small) {
@@ -1175,12 +1229,73 @@ static Client *group_bar_target_at(double x, double y, Client *ignore) {
 	return target != ignore ? target : NULL;
 }
 
+bool pointer_update_grab(void) {
+	Client *closet_drop_client = NULL;
+	if (!server.grab_client)
+		return false;
+	/* If we are currently grabbing the mouse, handle and return */
+	if (server.cursor_mode == CurMove) {
+		/* Move the grabbed client to the new position. */
+		server.grab_client->iscustomsize = 1;
+		server.grab_client->float_geom = (struct wlr_box){
+			.x = (int32_t)round(server.cursor->x) - server.grab_offset_x,
+			.y = (int32_t)round(server.cursor->y) - server.grab_offset_y,
+			.width = server.grab_client->geom.width,
+			.height = server.grab_client->geom.height};
+		Client *target = NULL;
+		if (server.grab_client->drag_to_tile)
+			target = group_bar_target_at(server.cursor->x, server.cursor->y,
+										 server.grab_client);
+		server.drop_to_group = target != NULL;
+		if (config.drag_tile_to_tile && server.grab_client->drag_to_tile)
+			closet_drop_client =
+				target ? target : find_closest_tiled_client(server.grab_client);
+		else
+			closet_drop_client = target;
+
+		if (closet_drop_client && server.drop_client &&
+			closet_drop_client != server.drop_client) {
+			server.drop_client->enable_drop_area_draw = false;
+			client_set_drop_area(server.drop_client);
+			server.drop_client = closet_drop_client;
+			server.drop_client->enable_drop_area_draw = true;
+			client_set_drop_area(server.drop_client);
+		} else if (closet_drop_client) {
+			server.drop_client = closet_drop_client;
+			server.drop_client->enable_drop_area_draw = true;
+			client_set_drop_area(server.drop_client);
+		} else if (server.drop_client) {
+			server.drop_client->enable_drop_area_draw = false;
+			client_set_drop_area(server.drop_client);
+			server.drop_client = NULL;
+		}
+		resize(server.grab_client, server.grab_client->float_geom,
+			   (ResizeOpts){.interact = 1});
+		return true;
+	} else if (server.cursor_mode == CurResize) {
+		if (server.grab_client->isfloating) {
+			server.grab_client->iscustomsize = 1;
+			Monitor *m = server.grab_client->mon;
+			if (m && m->last_resize_frame != m->frame_serial) {
+				m->last_resize_frame = m->frame_serial;
+				pointer_resize_floating_window(
+					server.grab_client, server.cursor->x, server.cursor->y);
+			}
+			return true;
+		} else {
+			resize_tile_client(server.grab_client, true, 0, 0);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void pointer_process_motion(uint32_t time, struct wlr_input_device *device,
 							double dx, double dy, double dx_unaccel,
 							double dy_unaccel) {
 	double sx = 0, sy = 0, sx_confined, sy_confined;
 	Client *c = NULL, *w = NULL;
-	Client *closet_drop_client = NULL;
 	LayerSurface *l = NULL;
 	MangoBarDecoration *bar = NULL;
 	struct wlr_surface *surface = NULL;
@@ -1268,9 +1383,17 @@ void pointer_process_motion(uint32_t time, struct wlr_input_device *device,
 		}
 	}
 
+	if (niri_overview_motion(server.selected_monitor))
+		return;
+
 	/* Find the client under the pointer and send the event along. */
-	node_at_point(server.cursor->x, server.cursor->y, &surface, &c, NULL, &bar,
-				  &sx, &sy);
+	pointer_node_at(server.cursor->x, server.cursor->y, &surface, &c, &bar,
+					&sx, &sy);
+
+	if (c && c->mon && c->mon->overview_input_blocked) {
+		wlr_seat_pointer_clear_focus(server.seat);
+		return;
+	}
 
 	/* While a grab owns the pointer the bar under it is not really hovered. */
 	if (server.cursor_mode != CurMove && server.cursor_mode != CurResize) {
@@ -1325,60 +1448,8 @@ void pointer_process_motion(uint32_t time, struct wlr_input_device *device,
 
 	pointer_update_resize_cursor(c, surface);
 
-	/* If we are currently grabbing the mouse, handle and return */
-	if (server.cursor_mode == CurMove) {
-		/* Move the grabbed client to the new position. */
-		server.grab_client->iscustomsize = 1;
-		server.grab_client->float_geom = (struct wlr_box){
-			.x = (int32_t)round(server.cursor->x) - server.grab_offset_x,
-			.y = (int32_t)round(server.cursor->y) - server.grab_offset_y,
-			.width = server.grab_client->geom.width,
-			.height = server.grab_client->geom.height};
-		Client *target = NULL;
-		if (server.grab_client->drag_to_tile)
-			target = group_bar_target_at(server.cursor->x, server.cursor->y,
-										 server.grab_client);
-		server.drop_to_group = target != NULL;
-		if (config.drag_tile_to_tile && server.grab_client->drag_to_tile)
-			closet_drop_client =
-				target ? target : find_closest_tiled_client(server.grab_client);
-		else
-			closet_drop_client = target;
-
-		if (closet_drop_client && server.drop_client &&
-			closet_drop_client != server.drop_client) {
-			server.drop_client->enable_drop_area_draw = false;
-			client_set_drop_area(server.drop_client);
-			server.drop_client = closet_drop_client;
-			server.drop_client->enable_drop_area_draw = true;
-			client_set_drop_area(server.drop_client);
-		} else if (closet_drop_client) {
-			server.drop_client = closet_drop_client;
-			server.drop_client->enable_drop_area_draw = true;
-			client_set_drop_area(server.drop_client);
-		} else if (server.drop_client) {
-			server.drop_client->enable_drop_area_draw = false;
-			client_set_drop_area(server.drop_client);
-			server.drop_client = NULL;
-		}
-		resize(server.grab_client, server.grab_client->float_geom,
-			   (ResizeOpts){.interact = 1});
+	if (pointer_update_grab())
 		return;
-	} else if (server.cursor_mode == CurResize) {
-		if (server.grab_client->isfloating) {
-			server.grab_client->iscustomsize = 1;
-			Monitor *m = server.grab_client->mon;
-			if (m && m->last_resize_frame != m->frame_serial) {
-				m->last_resize_frame = m->frame_serial;
-				pointer_resize_floating_window(
-					server.grab_client, server.cursor->x, server.cursor->y);
-			}
-			return;
-		} else {
-			resize_tile_client(server.grab_client, true, 0, 0);
-			return;
-		}
-	}
 
 	/* If there's no client surface under the cursor, set the cursor image
 	 * to a default. This is what makes the cursor image appear when you
@@ -1451,9 +1522,10 @@ void pointer_focus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	 * change: the keyboard focus would be restored after the drag ends. */
 	if (config.sloppyfocus && !server.start_drag_window && !server.seat->drag &&
 		c && time && c->scene && c->scene->node.enabled &&
-		(!c->mon || !is_overcircle_mode(c->mon)) && !c->animation.tagining &&
+		(!c->mon || !is_overcircle_mode(c->mon)) &&
+		!pointer_overview_input_active(c->mon) && !c->animation.tagining &&
 		(surface != server.seat->pointer_state.focused_surface ||
-		 (server.selected_monitor && server.selected_monitor->isoverview &&
+		 (pointer_overview_input_active(server.selected_monitor) &&
 		  server.selected_monitor->sel != c)) &&
 		!client_is_unmanaged(c) && VISIBLEON(c, c->mon))
 		client_focus(c, 0);
@@ -1489,7 +1561,7 @@ void pointer_focus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	sx *= scale;
 	sy *= scale;
 
-	if (!c || !c->mon || !c->mon->isoverview) {
+	if (!pointer_overview_input_active(c ? c->mon : NULL)) {
 		// don't let window get pointer focus,
 		// avoid game window force grab pointer in overview mode
 		struct wlr_surface *old_focus =
@@ -1760,8 +1832,15 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 			return true;
 		}
 
-		node_at_point(server.cursor->x, server.cursor->y, &surface, NULL, NULL,
-					  &bar, NULL, NULL);
+		pointer_node_at(server.cursor->x, server.cursor->y, &surface, NULL,
+						&bar, NULL, NULL);
+
+		if (niri_overview_button(server.selected_monitor, event->button,
+								 true)) {
+			wlr_seat_pointer_notify_clear_focus(server.seat);
+			return true;
+		}
+
 		if (toplevel_from_wlr_surface(surface, &c, &l) >= 0) {
 			if (c && c->scene && c->scene->node.enabled &&
 				VISIBLEON(c, c->mon) &&
@@ -1783,13 +1862,13 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 		}
 
 		// In overview mode, left click jumps and right click closes windows.
-		if (server.selected_monitor && server.selected_monitor->isoverview &&
+		if (pointer_overview_input_active(server.selected_monitor) &&
 			event->button == BTN_LEFT && c) {
 			toggle_overview(&(Arg){.tc = c});
 			return true;
 		}
 
-		if (server.selected_monitor && server.selected_monitor->isoverview &&
+		if (pointer_overview_input_active(server.selected_monitor) &&
 			event->button == BTN_RIGHT && c) {
 			pending_kill_client(c);
 			return true;
@@ -1838,7 +1917,7 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 				 (strcmp(server.key_mode.mode, m->mode) == 0)) &&
 				CLEANMASK(mods) == CLEANMASK(m->mod) &&
 				event->button == m->button && m->func) {
-				m->func(&m->arg);
+				dispatch_action(m->func, &m->arg);
 				return true;
 			}
 		}
@@ -1863,6 +1942,8 @@ bool pointer_process_button_press(struct wlr_pointer_button_event *event) {
 		server.group_bar_drag_pending = false;
 		server.drop_to_group = false;
 		server.group_bar_drag_client = NULL;
+		if (niri_overview_button(server.selected_monitor, event->button, false))
+			return true;
 		if (server.cursor_mode == CurMove && server.grab_client &&
 			server.grab_client->drag_to_tile) {
 			Client *jc = server.grab_client;

@@ -33,6 +33,8 @@ typedef struct Layout {
 	bool (*predict)(Monitor *m, Client *c, struct wlr_box *out);
 	const char *name;
 	uint32_t id;
+	void (*exchange)(Client *, Client *);
+	bool exchange_mixed;
 } Layout;
 
 extern Layout overviewlayout;

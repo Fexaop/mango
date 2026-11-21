@@ -30,6 +30,8 @@ typedef struct LastCursor LastCursor;
 typedef struct MangoJumpLabel MangoJumpLabel;
 typedef struct MangoBarDecoration MangoBarDecoration;
 typedef struct LayoutContext LayoutContext;
+typedef struct NiriOverview NiriOverview;
+typedef struct WindowGroup WindowGroup;
 
 /*
  * Forward declarations for libwayland / wlroots / scenefx structs referenced by

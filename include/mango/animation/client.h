@@ -37,6 +37,8 @@ void client_draw_border(Client *c, struct ivec2 offsets);
 struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box,
 						  struct ivec2 offsets);
 void client_set_drop_area(Client *c);
+bool client_get_drop_area(Client *c, double x, double y,
+						  struct wlr_box *box, int32_t *direction);
 
 /* ---------- central rendering entry point ---------- */
 void client_set_clip(Client *c, float factor);
@@ -64,6 +66,7 @@ typedef struct ResizeOpts {
 
 void resize(Client *c, struct wlr_box geo, ResizeOpts opts);
 bool client_draw_fadeout_frame(Client *c);
+
 void client_set_focused_opacity_animation(Client *c);
 void client_set_unfocused_opacity_animation(Client *c);
 void client_start_focus_animation(Client *c, bool focused);

@@ -46,7 +46,7 @@ uint32_t tag_remap_mask(uint32_t tags, const uint32_t *map);
 
 // reset a pertag slot to its tagrule state.
 
-// Compact occupied tags on this monitor to 1..k (e.g. 1,3,9 -> 1,2,3).
+// Compact occupied/current tags in order; mode 2 defers until motion settles.
 void tag_gather_apply(Monitor *m);
 
 void tag_gather_move_pertag(Monitor *m, uint32_t dst, uint32_t src);

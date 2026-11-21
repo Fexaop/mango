@@ -1,4 +1,5 @@
 #include "mango/layout/arrange.h"
+#include "mango/animation/client.h"
 #include "mango/animation/tag.h"
 #include "mango/common/server.h"
 #include "mango/dispatch/bind.h"
@@ -12,7 +13,10 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/manage/window-group.h"
+#include "mango/overview/niri.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <wlr/types/wlr_cursor.h>
 
 void set_size_per(Monitor *m, Client *c, bool reset_proportion) {
@@ -1150,7 +1154,7 @@ void pre_calculate_before_arrange(Monitor *m, bool want_animation,
 			client_check_tab_node_visible(c);
 		}
 
-		if (c->mon == m && (c->isglobal || c->isunglobal)) {
+		if (c->mon == m && !m->layout_group && (c->isglobal || c->isunglobal)) {
 			c->tags = m->tagset[m->seltags];
 		}
 
@@ -1223,7 +1227,7 @@ void pre_calculate_before_arrange(Monitor *m, bool want_animation,
 				}
 
 				if (!only_calculate)
-					set_arrange_visible(m, c, want_animation);
+					set_arrange_visible(m, c, want_animation, from_view);
 			} else if (special_keep_bg_client(m, c)) {
 				c->tag_visible = true;
 				client_update_visibility(c);
@@ -1231,7 +1235,7 @@ void pre_calculate_before_arrange(Monitor *m, bool want_animation,
 				c->animation.tagining = false;
 				c->animation.tagouting = false;
 			} else if (!only_calculate && c != server.grab_client) {
-				set_arrange_hidden(m, c, want_animation);
+				set_arrange_hidden(m, c, want_animation, from_view);
 			}
 
 			if (!only_calculate)
@@ -1305,23 +1309,59 @@ void tag_gather_move_pertag(Monitor *m, uint32_t dst, uint32_t src) {
 	tag_gather_reset_slot(m, src);
 }
 
-// Compact occupied tags on this monitor to 1..k (e.g. 1,3,9 -> 1,2,3).
+static bool tag_gather_ready(const Monitor *m) {
+	const WorkspaceViewport *v = &m->workspace_viewport;
+	Client *c;
+
+	if (m->layout_group ||
+		(server.grab_client && server.grab_client->mon == m) ||
+		(server.gesture_drive_active && server.gesture_drive_mon == m) ||
+		v->gesture || (v->running && config.animations && v->duration) ||
+		!niri_overview_compaction_ready(m))
+		return false;
+
+	wl_list_for_each(c, &server.clients, link) {
+		if (c->mon == m && !c->iskilling && c->need_output_flush &&
+			c->animation.running && client_animations_enabled(c))
+			return false;
+	}
+	wl_list_for_each(c, &server.fadeout_clients, fadeout_link) {
+		if (c->mon == m)
+			return false;
+	}
+	return true;
+}
+
+// Compact retained tags in their existing order, never during mode-2 motion.
 void tag_gather_apply(Monitor *m) {
+	if (!m)
+		return;
+	if (m->iscleanuping || config.tag_gather != 2)
+		m->tag_gather_pending = false;
+	if (m->iscleanuping || !config.tag_gather)
+		return;
+
+	bool strict = config.tag_gather == 2;
+	if (strict && !tag_gather_ready(m)) {
+		m->tag_gather_pending = true;
+		return;
+	}
+	/* Clear even when this safe scan finds no changes. A reopened current
+	 * workspace is retained by the same occupancy scan, without a timer. */
+	m->tag_gather_pending = false;
+
 	Client *c;
 	uint32_t occupied = 0;
 	uint32_t map[tag_num_MAX + 1] = {0};
 	uint32_t i, next = 1, k;
 	bool changed = false;
 
-	if (!m || m->iscleanuping)
-		return;
-
 	// collect occupied tags on this monitor.
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon == m && !c->iskilling && !(c->tags & TAG0_MASK))
 			occupied |= c->tags & server.tagmask;
 	}
-	// the current view counts as occupied even when empty.
+	// The active workspace keeps its slot even after its last client closes.
 	occupied |= m->tagset[m->seltags] & server.tagmask;
 
 	// old->new mapping and detect gaps.
@@ -1335,12 +1375,49 @@ void tag_gather_apply(Monitor *m) {
 		}
 	}
 
+	k = next - 1;
+	if (strict) {
+		uint32_t empty = next <= (uint32_t)config.tag_num
+							 ? next
+							 : (uint32_t)config.tag_num;
+
+		for (i = 1; i <= (uint32_t)config.tag_num; i++) {
+			if (!(occupied & (1u << (i - 1))))
+				map[i] = empty;
+		}
+
+		// A packed retained set can still have empty history in a hole.
+		for (i = 0; i < 2 && !changed; i++)
+			changed = tag_remap_mask(m->tagset[i], map) != m->tagset[i];
+		changed = changed ||
+				  tag_remap_mask(m->ovbk_current_tagset, map) !=
+					  m->ovbk_current_tagset ||
+				  tag_remap_mask(m->ovbk_prev_tagset, map) != m->ovbk_prev_tagset ||
+				  (m->pertag->curtag <= (uint32_t)config.tag_num &&
+				   map[m->pertag->curtag] != m->pertag->curtag) ||
+				  (m->pertag->prevtag <= (uint32_t)config.tag_num &&
+				   map[m->pertag->prevtag] != m->pertag->prevtag);
+		if (!changed) {
+			wl_list_for_each(c, &server.clients, link) {
+				if (c->mon == m && !c->iskilling &&
+					tag_remap_mask(c->oldtags, map) != c->oldtags) {
+					changed = true;
+					break;
+				}
+			}
+		}
+	}
+
 	if (!changed)
 		return;
 
 	// remap client tags.
 	wl_list_for_each(c, &server.clients, link) {
-		if (c->mon != m || c->iskilling || (c->tags & TAG0_MASK))
+		if (c->mon != m || c->iskilling)
+			continue;
+		if (strict)
+			c->oldtags = tag_remap_mask(c->oldtags, map);
+		if (c->tags & TAG0_MASK)
 			continue;
 		c->tags = tag_remap_mask(c->tags, map);
 	}
@@ -1351,24 +1428,53 @@ void tag_gather_apply(Monitor *m) {
 	m->ovbk_current_tagset = tag_remap_mask(m->ovbk_current_tagset, map);
 	m->ovbk_prev_tagset = tag_remap_mask(m->ovbk_prev_tagset, map);
 
-	// keep view indices; empty tags stay unchanged.
+	// Tag 0 remains special; mode 2 maps empty history to the trailing slot.
 	if (m->pertag->curtag <= (uint32_t)config.tag_num && map[m->pertag->curtag])
 		m->pertag->curtag = map[m->pertag->curtag];
 	if (m->pertag->prevtag <= (uint32_t)config.tag_num &&
 		map[m->pertag->prevtag])
 		m->pertag->prevtag = map[m->pertag->prevtag];
 
+	if (strict) {
+		// Empty native slots own their caches, not any occupied workspace's.
+		// Release them before moving occupied state into their destinations.
+		for (i = 1; i <= (uint32_t)config.tag_num; i++) {
+			if (occupied & (1u << (i - 1)))
+				continue;
+			dwindle_free_tree(m->pertag->dwindle_root[i]);
+			m->pertag->dwindle_root[i] = NULL;
+			clear_scroller_state(m->pertag->scroller_state[i]);
+			m->pertag->scroller_state[i] = NULL;
+			free(m->window_groups[i]);
+			m->window_groups[i] = NULL;
+		}
+	}
+
 	// move per-tag state in ascending order so later moves don't clobber
 	// earlier sources.
 	for (i = 1; i <= (uint32_t)config.tag_num; i++) {
-		if (map[i] && map[i] != i)
+		if (map[i] && map[i] != i &&
+			(!strict || (occupied & (1u << (i - 1))))) {
 			tag_gather_move_pertag(m, map[i], i);
+			if (strict) {
+				m->window_groups[map[i]] = m->window_groups[i];
+				m->window_groups[i] = NULL;
+				if (m->window_groups[map[i]])
+					m->window_groups[map[i]]->tag = map[i];
+			}
+		}
 	}
 
 	// reset trailing empty slots.
-	k = next - 1;
 	for (i = k + 1; i <= (uint32_t)config.tag_num; i++)
 		tag_gather_reset_slot(m, i);
+
+	if (strict) {
+		niri_overview_remap_tags(m, map, occupied);
+		printstatus(IPC_WATCH_ARRANGGE);
+	} else {
+		workspace_viewport_remap(m, map);
+	}
 }
 
 Layout overviewlayout = {"󰃇", overview, NULL, "overview"};
@@ -1376,24 +1482,27 @@ Layout overviewlayout = {"󰃇", overview, NULL, "overview"};
 Layout layouts[] = {
 	// At least two are required; fewer than two cannot be removed.
 	/* symbol     arrange function   name */
-	{"T", tile, tile_predict, "tile", TILE},				 // Tiled layout
-	{"S", scroller, scroller_predict, "scroller", SCROLLER}, // Scroll layout
-	{"G", grid, grid_predict, "grid", GRID},				 // Grid layout
-	{"M", monocle, monocle_predict, "monocle", MONOCLE},	 // Single layout
-	{"K", deck, deck_predict, "deck", DECK},				 // Card layout
+	{"T", tile, tile_predict, "tile", TILE}, // Tiled layout
+	{"S", scroller, scroller_predict, "scroller", SCROLLER,
+	 exchange_two_scroller_clients, true},				 // Scroll layout
+	{"G", grid, grid_predict, "grid", GRID},			 // Grid layout
+	{"M", monocle, monocle_predict, "monocle", MONOCLE}, // Single layout
+	{"K", deck, deck_predict, "deck", DECK},			 // Card layout
 	{"CT", center_tile, center_tile_predict, "center_tile",
 	 CENTER_TILE}, // Centered layout
 	{"RT", right_tile, right_tile_predict, "right_tile",
 	 RIGHT_TILE}, // Right layout
 	{"VS", vertical_scroller, vertical_scroller_predict, "vertical_scroller",
-	 VERTICAL_SCROLLER}, // Vertical scroll layout
+	 VERTICAL_SCROLLER, exchange_two_scroller_clients,
+	 true}, // Vertical scroll layout
 	{"VT", vertical_tile, vertical_tile_predict, "vertical_tile",
 	 VERTICAL_TILE}, // Vertical tiled layout
 	{"VG", vertical_grid, vertical_grid_predict, "vertical_grid",
 	 VERTICAL_GRID}, // Vertical grid layout
 	{"VK", vertical_deck, vertical_deck_predict, "vertical_deck",
 	 VERTICAL_DECK}, // Vertical card layout
-	{"DW", dwindle, dwindle_predict, "dwindle", DWINDLE},
+	{"DW", dwindle, dwindle_predict, "dwindle", DWINDLE, dwindle_swap_clients,
+	 false},
 	{"F", fair, fair_predict, "fair", FAIR},
 	{"VF", vertical_fair, vertical_fair_predict, "vertical_fair",
 	 VERTICAL_FAIR},
@@ -1419,6 +1528,8 @@ bool special_handle_empty_view(Monitor *m, bool from_view) {
 	return false;
 }
 void arrange(Monitor *m, bool want_animation, bool from_view) {
+	if (m && config.tag_gather != 2)
+		m->tag_gather_pending = false;
 
 	if (!m || m->iscleanuping)
 		return;
@@ -1432,6 +1543,9 @@ void arrange(Monitor *m, bool want_animation, bool from_view) {
 
 	if (special_handle_empty_view(m, from_view))
 		return;
+
+	if (!m->layout_group && !m->niri_ov)
+		workspace_viewport_sync(m, want_animation, from_view);
 
 	pre_calculate_before_arrange(m, want_animation, from_view, false);
 	/* Must run after pre_calculate: global windows get their tags rewritten
@@ -1450,7 +1564,9 @@ void arrange(Monitor *m, bool want_animation, bool from_view) {
 		m->gappiv = m->special_gappiv;
 	}
 
-	if (m->isoverview) {
+	if (m->niri_ov) {
+		niri_overview_arrange(m);
+	} else if (m->isoverview) {
 		overviewlayout.arrange(m);
 	} else {
 		m->pertag->ltidxs[get_mon_curtag(m)]->arrange(m);
@@ -1464,7 +1580,9 @@ void arrange(Monitor *m, bool want_animation, bool from_view) {
 	}
 
 	// gather after layout/animation setup so tag-switch animations still play.
-	if (config.tag_gather) {
+	// Mode 1 defers gathering until the Niri overview closes; mode 2 also
+	// gathers at safe transitions inside the overview.
+	if (config.tag_gather && !m->niri_ov) {
 		tag_gather_apply(m);
 	}
 

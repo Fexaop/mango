@@ -9,6 +9,7 @@
 #include "mango/manage/client.h"
 #include "mango/manage/layer.h"
 #include "mango/manage/monitor.h"
+#include "mango/overview/niri.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <libinput.h>
@@ -27,6 +28,7 @@
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
+#include <wlr/types/wlr_seat.h>
 
 static struct wl_list ipc_watch_clients;
 static int ipc_device_watch_count;
@@ -605,6 +607,33 @@ cJSON *build_client_json(Client *c) {
 	cJSON_AddBoolToObject(obj, "is_urgent", c->isurgent);
 	cJSON_AddBoolToObject(obj, "is_scratchpad", c->is_in_scratchpad);
 	cJSON_AddBoolToObject(obj, "is_namedscratchpad", c->isnamedscratchpad);
+	cJSON_AddBoolToObject(obj, "has_keyboard_focus",
+						  server.seat->keyboard_state.focused_surface ==
+							  client_surface(c));
+	cJSON_AddBoolToObject(obj, "has_pointer_focus",
+						  server.seat->pointer_state.focused_surface ==
+							  client_surface(c));
+	if (c->mon && c->mon->niri_ov && c->ov_card_tree) {
+		cJSON *preview = cJSON_AddObjectToObject(obj, "overview_geometry");
+		cJSON_AddNumberToObject(preview, "x", c->niri_preview_geom.x);
+		cJSON_AddNumberToObject(preview, "y", c->niri_preview_geom.y);
+		cJSON_AddNumberToObject(preview, "width", c->niri_preview_geom.width);
+		cJSON_AddNumberToObject(preview, "height", c->niri_preview_geom.height);
+		NiriOverviewDrag state;
+		if (niri_overview_get_drag(c, &state)) {
+			cJSON *drag = cJSON_AddObjectToObject(obj, "overview_drag");
+			cJSON_AddBoolToObject(drag, "detached", state.detached);
+			cJSON_AddNumberToObject(drag, "target_tag", state.target_tag);
+			cJSON_AddBoolToObject(drag, "inserts_workspace", state.inserts_workspace);
+			if (state.target_tag) {
+				cJSON *hint = cJSON_AddObjectToObject(drag, "highlight_geometry");
+				cJSON_AddNumberToObject(hint, "x", state.highlight.x);
+				cJSON_AddNumberToObject(hint, "y", state.highlight.y);
+				cJSON_AddNumberToObject(hint, "width", state.highlight.width);
+				cJSON_AddNumberToObject(hint, "height", state.highlight.height);
+			}
+		}
+	}
 	cJSON_AddNumberToObject(obj, "x", c->geom.x);
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
@@ -965,7 +994,7 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		if (func) {
-			func(&arg);
+			dispatch_action(func, &arg);
 			send_static_json(client_fd, "{\"success\":true}\n");
 		} else {
 			send_static_json(client_fd, "{\"error\":\"unknown function\"}\n");

@@ -1,5 +1,6 @@
 #include "mango/manage/client.h"
 #include "mango/animation/client.h"
+#include "mango/animation/tag.h"
 #include "mango/common/input-event-codes.h"
 #include "mango/common/log.h"
 #include "mango/common/scene_node.h"
@@ -20,7 +21,9 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/manage/window-group.h"
 #include "mango/manage/xwayland_primary.h"
+#include "mango/overview/niri.h"
 #include "mango/overview/overview.h"
 #include "mango/switcher/switcher.h"
 #include <fcntl.h>
@@ -1242,7 +1245,7 @@ Client *direction_select(const Arg *arg) {
 		return NULL;
 	}
 
-	return find_client_by_direction(tc, arg, true);
+	return window_group_neighbour(tc, arg->i);
 }
 
 /* We probably should change the name of this, it sounds like
@@ -1595,10 +1598,10 @@ void set_float_malposition(Client *tc) {
 }
 
 void client_reset_mon_tags(Client *c, Monitor *mon, uint32_t newtags) {
-	if (!newtags && mon && !mon->isoverview) {
-		c->tags = mon->tagset[mon->seltags];
-	} else if (!newtags && mon && mon->isoverview) {
-		c->tags = mon->ovbk_current_tagset;
+	if (!newtags && mon) {
+		c->tags = mon->isoverview && !mon->niri_ov
+					  ? mon->ovbk_current_tagset
+					  : mon->tagset[mon->seltags];
 	} else if (newtags) {
 		uint32_t masked =
 			(newtags & TAG0_MASK) ? TAG0_MASK : (newtags & TAGMASK);
@@ -2225,20 +2228,16 @@ void init_client_properties(Client *c) {
 
 static void client_insert_tiling_order(Client *c) {
 	Client *at_client = NULL;
+	Monitor *m = c->mon ? c->mon : server.selected_monitor;
 
-	if (config.new_is_master && server.selected_monitor &&
-		!is_scroller_layout(server.selected_monitor))
+	if (config.new_is_master && m && !is_scroller_layout(m))
 		wl_list_insert(&server.clients, &c->link);
-	else if (server.selected_monitor &&
-			 is_scroller_layout(server.selected_monitor) &&
-			 server.selected_monitor->visible_scroll_tiling_clients > 0) {
-		if (server.selected_monitor->sel &&
-			ISSCROLLTILED(server.selected_monitor->sel) &&
-			VISIBLEON(server.selected_monitor->sel, server.selected_monitor)) {
-			at_client =
-				scroll_get_stack_tail_client(server.selected_monitor->sel);
+	else if (m && is_scroller_layout(m) &&
+			 m->visible_scroll_tiling_clients > 0) {
+		if (m->sel && ISSCROLLTILED(m->sel) && VISIBLEON(m->sel, m)) {
+			at_client = scroll_get_stack_tail_client(m->sel);
 		} else {
-			at_client = center_tiled_select(server.selected_monitor);
+			at_client = center_tiled_select(m);
 		}
 
 		if (at_client)
@@ -2264,7 +2263,7 @@ static void client_negotiate_initial_size(Client *c, Monitor *rule_mon,
 
 	Monitor *m =
 		rule_mon ? rule_mon : (c->mon ? c->mon : server.selected_monitor);
-	if (!m || m->isoverview)
+	if (!m || (m->isoverview && !m->niri_ov))
 		return;
 
 	int32_t bw = (int32_t)c->bw;
@@ -2293,9 +2292,14 @@ static void client_negotiate_initial_size(Client *c, Monitor *rule_mon,
 		return;
 	}
 
-	uint32_t tag = get_mon_curtag(m);
+	/* Initial configure uses the same native workspace context as later
+	 * operations. Neither viewport travel nor zoom changes its dimensions. */
+	WindowGroupContext ctx;
+	uint32_t tag = get_tags_first_tag_num(c->tags);
+	window_group_enter(window_group_for_tag(m, tag), &ctx);
 	const Layout *layout = m->pertag->ltidxs[tag];
 	if (!layout || !layout->predict) {
+		window_group_leave(&ctx);
 		c->mon = saved_mon;
 		c->tags = saved_tags;
 		return;
@@ -2312,6 +2316,7 @@ static void client_negotiate_initial_size(Client *c, Monitor *rule_mon,
 	wl_list_init(&c->link);
 	pre_calculate_before_arrange(m, false, false, true);
 
+	window_group_leave(&ctx);
 	c->mon = saved_mon;
 	c->tags = saved_tags;
 }
@@ -2322,6 +2327,7 @@ void handle_client_map(struct wl_listener *listener, void *data) {
 	int32_t i = 0;
 
 	c->id = generate_client_id();
+	window_registry_add(c);
 
 	/* Create scene tree for this client and its border */
 	c->scene = client_surface(c)->data =
@@ -2554,9 +2560,11 @@ void handle_client_unmap(struct wl_listener *listener, void *data) {
 	/* Called when the surface is unmapped, and should no longer be shown.
 	 */
 	Client *c = wl_container_of(listener, c, unmap);
+	window_registry_remove(c);
 	Monitor *m = NULL;
 	Client *nextfocus = NULL;
 	c->iskilling = 1;
+	niri_overview_client_gone(c);
 	if (c->tab_prev || c->tab_next)
 		tab_detach_client(c);
 	switcher_remove_client(c);
@@ -2631,10 +2639,9 @@ void handle_client_unmap(struct wl_listener *listener, void *data) {
 			client_focus(nextfocus, 1);
 		}
 
-		if (!nextfocus && server.selected_monitor->isoverview) {
-			Arg arg = {0};
-			toggle_overview(&arg);
-		}
+		if (!nextfocus && server.selected_monitor->isoverview &&
+			!server.selected_monitor->niri_ov)
+			toggle_overview(&(Arg){0});
 	}
 
 #ifdef XWAYLAND
@@ -2722,6 +2729,7 @@ void handle_client_unmap(struct wl_listener *listener, void *data) {
 void handle_client_destroy(struct wl_listener *listener, void *data) {
 	/* Called when the xdg_toplevel is destroyed. */
 	Client *c = wl_container_of(listener, c, destroy);
+	window_registry_remove(c);
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
@@ -2925,6 +2933,30 @@ void client_ensure_constraint(Client *c) {
 }
 
 void client_focus(Client *c, int32_t lift) {
+	Monitor *overview_mon = c ? c->mon : server.selected_monitor;
+	if (overview_mon && overview_mon->overview_input_blocked) {
+		if (server.session_locked ||
+			(c && (c->iskilling || !client_surface(c)->mapped)))
+			return;
+		Client *old = overview_mon->sel;
+		if (old && old != c) {
+			old->isfocusing = false;
+			client_update_border_color(old);
+		}
+		overview_mon->sel = c;
+		if (c) {
+			/* Native commands resolve their target through focus history.
+			 * Keep it in sync with overview selection without activating an
+			 * application surface or assigning it seat focus. */
+			wl_list_remove(&c->flink);
+			wl_list_insert(&server.focus_stack, &c->flink);
+			c->isfocusing = true;
+			window_group_for_tag(overview_mon, window_group_client_tag(c))
+				->selected = c->id;
+			client_update_border_color(c);
+		}
+		return;
+	}
 
 	Client *last_focus_client = NULL;
 	Monitor *um = NULL;
@@ -2974,6 +3006,8 @@ void client_focus(Client *c, int32_t lift) {
 		server.selected_monitor->prevsel = server.selected_monitor->sel;
 		server.selected_monitor->sel = c;
 		c->isfocusing = true;
+		window_group_for_tag(c->mon, window_group_client_tag(c))->selected =
+			c->id;
 
 		tab_sync_focus(c);
 
@@ -3106,6 +3140,8 @@ void client_focus(Client *c, int32_t lift) {
 }
 
 void client_active(Client *c) {
+	if (c && c->mon && c->mon->overview_input_blocked)
+		return;
 	uint32_t target;
 
 	if (client_is_unmanaged(c)) {
@@ -3149,16 +3185,28 @@ void client_active(Client *c) {
 void client_view_on_monitor(const Arg *arg, bool want_animation, Monitor *m,
 							bool changefocus) {
 	uint32_t i, tmptag;
-
-	if (!m || (arg->ui != (~0 & TAGMASK) && m->isoverview)) {
+	uint32_t target = arg->ui;
+	if (m && !m->niri_ov && config.tag_gather == 2 && target &&
+		!(target & ~TAGMASK) && !(target & (target - 1))) {
+		target = 1u << (monitor_resolve_tag(
+						   m, get_tags_first_tag_num(target)) - 1);
+		if (target == m->tagset[m->seltags])
+			return;
+	}
+	if (m && m->niri_ov && (target & TAGMASK)) {
+		niri_overview_view_tag(m, get_tags_first_tag_num(target & TAGMASK));
 		return;
 	}
 
-	if (arg->ui == 0) {
+	if (!m || (target != (~0 & TAGMASK) && m->isoverview)) {
 		return;
 	}
 
-	if (arg->ui == UINT32_MAX) {
+	if (target == 0) {
+		return;
+	}
+
+	if (target == UINT32_MAX) {
 		if (m->tagset[0] != m->tagset[1]) {
 			m->pertag->prevtag = get_tags_first_tag_num(m->tagset[m->seltags]);
 			m->seltags ^= 1; /* toggle sel tagset */
@@ -3169,21 +3217,21 @@ void client_view_on_monitor(const Arg *arg, bool want_animation, Monitor *m,
 		}
 	}
 
-	if ((m->tagset[m->seltags] & arg->ui & (TAGMASK | TAG0_MASK)) != 0) {
+	if ((m->tagset[m->seltags] & target & (TAGMASK | TAG0_MASK)) != 0) {
 		want_animation = false;
 	}
 
 	m->seltags ^= 1; /* toggle sel tagset */
 
-	if (arg->ui & (TAGMASK | TAG0_MASK)) {
-		m->tagset[m->seltags] = arg->ui & (TAGMASK | TAG0_MASK);
+	if (target & (TAGMASK | TAG0_MASK)) {
+		m->tagset[m->seltags] = target & (TAGMASK | TAG0_MASK);
 		tmptag = m->pertag->curtag;
 
-		if (arg->ui & TAG0_MASK)
+		if (target & TAG0_MASK)
 			m->pertag->curtag = 0;
 		else {
-			for (i = 0; !(arg->ui & 1 << i) && i < (uint32_t)config.tag_num &&
-						arg->ui != 0;
+			for (i = 0; !(target & 1 << i) && i < (uint32_t)config.tag_num &&
+						target != 0;
 				 i++)
 				;
 			m->pertag->curtag = i >= (uint32_t)config.tag_num
@@ -3288,6 +3336,11 @@ void client_set_monitor(Client *c, Monitor *m, uint32_t newtags, bool focus) {
 		oldmon->prevsel = NULL;
 	}
 
+	if (oldmon && oldmon->niri_ov) {
+		overview_destroy_card(c);
+		c->overview_scene_surface = NULL;
+		niri_overview_client_gone(c);
+	}
 	c->mon = m;
 
 	/* Scene graph sends surface leave/enter events on move and resize */
@@ -3356,20 +3409,28 @@ void client_change_mon(Client *c, Monitor *m) {
 }
 
 void view_insert_shift_tags(Monitor *m, uint32_t target) {
+	view_insert_shift_tags_until(m, target, (uint32_t)config.tag_num);
+}
+
+/* Move only the occupied chain into its next empty slot. Layout trees are
+ * transferred by pointer; clients keep their surfaces and native geometry. */
+void view_insert_shift_tags_until(Monitor *m, uint32_t target, uint32_t empty) {
 	Client *c;
 	uint32_t map[tag_num_MAX + 1] = {0};
 	uint32_t i;
 
-	if (!m || target < 1 || target >= (uint32_t)config.tag_num)
+	if (!m || target < 1 || target >= empty || empty > (uint32_t)config.tag_num)
 		return;
 
-	if (get_tag_status((uint32_t)config.tag_num, m))
+	if (get_tag_status(empty, m))
 		return;
+	dwindle_free_tree(m->pertag->dwindle_root[empty]);
+	m->pertag->dwindle_root[empty] = NULL;
+	clear_scroller_state(m->pertag->scroller_state[empty]);
+	m->pertag->scroller_state[empty] = NULL;
 
 	for (i = 1; i <= (uint32_t)config.tag_num; i++) {
-		if (i < target)
-			map[i] = i;
-		else if (i < (uint32_t)config.tag_num)
+		if (i >= target && i < empty)
 			map[i] = i + 1;
 		else
 			map[i] = i;
@@ -3392,12 +3453,23 @@ void view_insert_shift_tags(Monitor *m, uint32_t target) {
 		map[m->pertag->prevtag])
 		m->pertag->prevtag = map[m->pertag->prevtag];
 
-	for (i = (uint32_t)config.tag_num - 1; i >= target; i--) {
+	for (i = empty - 1; i >= target; i--) {
 		tag_gather_move_pertag(m, i + 1, i);
 	}
+	workspace_viewport_remap(m, map);
 }
 
 void client_set_floating(Client *c, int32_t floating, bool want_animation) {
+	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling)
+		return;
+	NiriOverview *ov = niri_overview_begin_edit(c->mon);
+	if (ov) {
+		client_set_floating(c, floating, want_animation);
+		niri_overview_end_edit(ov);
+		return;
+	}
+	if (c->mon->niri_ov)
+		return;
 
 	Client *fc = NULL;
 	struct wlr_box target_box;
@@ -3492,6 +3564,12 @@ void client_set_fullscreen(
 		c == server.grab_client)
 		return;
 
+	NiriOverview *ov = niri_overview_begin_edit(c->mon);
+	if (ov) {
+		client_set_fullscreen(c, fullscreen, rearrange);
+		niri_overview_end_edit(ov);
+		return;
+	}
 	if (c->mon->isoverview)
 		return;
 
@@ -3558,6 +3636,12 @@ void client_set_maximize_screen(Client *c, int32_t maximizescreen,
 		c == server.grab_client)
 		return;
 
+	NiriOverview *ov = niri_overview_begin_edit(c->mon);
+	if (ov) {
+		client_set_maximize_screen(c, maximizescreen, rearrange);
+		niri_overview_end_edit(ov);
+		return;
+	}
 	if (c->mon->isoverview)
 		return;
 
@@ -3872,28 +3956,10 @@ void client_add_dim_node(Client *c) {
 	mango_dim_node_set_enabled(c->dim_node, false);
 }
 
-void client_exchange(Client *c1, Client *c2) {
-	if (c1 == NULL || c2 == NULL ||
-		(!config.exchange_cross_monitor && c1->mon != c2->mon)) {
-		return;
-	}
+void client_exchange(Client *c1, Client *c2) { window_group_exchange(c1, c2); }
 
-	Monitor *m1 = c1->mon;
-	Monitor *m2 = c2->mon;
-	const Layout *layout1 = m1->pertag->ltidxs[get_client_tag_idx(c1)];
-	const Layout *layout2 = m2->pertag->ltidxs[get_client_tag_idx(c2)];
-
-	if (layout1->id == SCROLLER || layout2->id == SCROLLER ||
-		layout1->id == VERTICAL_SCROLLER || layout2->id == VERTICAL_SCROLLER) {
-		exchange_two_scroller_clients(c1, c2);
-		return;
-	}
-
-	if (layout1->id == DWINDLE && layout2->id == DWINDLE) {
-		dwindle_swap_clients(c1, c2);
-		return;
-	}
-
+void client_exchange_default(Client *c1, Client *c2) {
+	Monitor *m1 = c1->mon, *m2 = c2->mon;
 	client_swap_layout_properties(c1, c2);
 
 	wl_list_swap(&c1->link, &c2->link);
@@ -3980,6 +4046,14 @@ void client_replace(Client *c, Client *w, bool is_group_change_member,
 	if (c->mon && c->mon->isoverview) {
 		overview_backup_surface(c);
 	}
+
+	/* niri overview: take over the replaced window's workspace and place. */
+	if (c->mon && c->mon->niri_ov && c->ov_card_tree && w->niri_tag) {
+
+		c->niri_tag = w->niri_tag;
+		c->niri_move_running = false;
+	}
+	niri_overview_client_gone(w);
 
 	if (w->group_bar && !is_group_change_member) {
 		wlr_scene_node_set_enabled(&w->group_bar->scene->node, false);
@@ -4239,12 +4313,6 @@ void finish_exchange_arrange_and_focus(Client *c1, Client *c2, Monitor *m1,
 
 void client_tile_resize(Client *c, struct wlr_box geo, int32_t interact,
 						const LayoutContext *ctx) {
-	if (ctx && ctx->probe) {
-		if (c == ctx->probe && ctx->out)
-			*ctx->out = geo;
-		return;
-	}
-
 	if (!ISFAKETILED(c) || !c->mon)
 		return;
 
@@ -4257,6 +4325,14 @@ void client_tile_resize(Client *c, struct wlr_box geo, int32_t interact,
 		(c->tab_prev || c->tab_next)) {
 		geo.y = geo.y + (int32_t)config.tab_bar_height;
 		geo.height -= (int32_t)config.tab_bar_height;
+	}
+
+	/* Predictions must reserve the same decoration space as a real arrange,
+	 * including monocle/deck tabs and window groups. */
+	if (ctx && ctx->probe) {
+		if (c == ctx->probe && ctx->out)
+			*ctx->out = geo;
+		return;
 	}
 
 	if ((!c->isfullscreen && !c->ismaximizescreen) ||
@@ -4298,6 +4374,14 @@ bool client_should_visible(Client *c) {
 
 	if (c->iskilling)
 		return false;
+	if (workspace_viewport_client(c) && c->mon->workspace_viewport.running &&
+		client_animations_enabled(c)) {
+		WorkspaceViewport *v = &c->mon->workspace_viewport;
+		uint32_t tag = get_tags_first_tag_num(c->tags);
+		return c->tag_visible || (config.tag_animation_continuous
+			? (v->travel_tags & c->tags) != 0
+			: tag == v->source_tag || tag == v->target_tag);
+	}
 
 	if (c->animation.tagouting)
 		return true;
@@ -4316,7 +4400,8 @@ bool client_should_visible(Client *c) {
  * instead of being flagged one member at a time.
  */
 static void client_update_input_penetration(Client *c) {
-	mango_scene_node_set_ignore_hit(&c->scene->node, c->animation.tagouting);
+	mango_scene_node_set_ignore_hit(&c->scene->node, c->animation.tagouting ||
+		(workspace_viewport_client(c) && !c->tag_visible));
 	tab_update_input_penetration(c);
 }
 

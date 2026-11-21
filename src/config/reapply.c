@@ -176,6 +176,8 @@ void reset_option(void) {
 	 * space on all outputs. */
 	Monitor *m = NULL;
 	wl_list_for_each(m, &server.monitors, link) {
+		if (config.tag_gather != 2)
+			m->tag_gather_pending = false;
 		if (m->wlr_output->enabled) {
 			title_message_bar_apply_config(m);
 			title_message_bar_update(m);

@@ -1,5 +1,6 @@
 #include "mango/animation/client.h"
 #include "mango/animation/common.h"
+#include "mango/animation/tag.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
 #include "mango/draw/title-message-bar.h"
@@ -9,6 +10,7 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
+#include "mango/manage/window-group.h"
 #include "mango/overview/overview.h"
 #include <math.h>
 #include <scenefx/types/wlr_scene.h>
@@ -57,8 +59,8 @@ bool client_animations_enabled(const Client *c) {
 
 bool client_is_ignore_output_clip(Client *c) {
 	return c == server.grab_client ||
-		   (!ISSCROLLTILED(c) && !c->animation.tagining &&
-			!c->animation.tagouting);
+		   (!workspace_viewport_client(c) && !ISSCROLLTILED(c) &&
+			!c->animation.tagining && !c->animation.tagouting);
 }
 
 struct ivec2 compute_edge_offsets(Client *c) {
@@ -769,8 +771,8 @@ struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box,
 						  struct ivec2 offsets) {
 	struct ivec2 offset = {0};
 
-	if (!ISSCROLLTILED(c) && !c->animation.tagining && !c->animation.tagouted &&
-		!c->animation.tagouting)
+	if (!workspace_viewport_client(c) && !ISSCROLLTILED(c) &&
+		!c->animation.tagining && !c->animation.tagouted && !c->animation.tagouting)
 		return offset;
 
 	int32_t bw = (int32_t)c->bw;
@@ -796,58 +798,37 @@ struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box,
 	}
 
 	if ((clip_box->width + bw <= 0 || clip_box->height + bw <= 0) &&
-		(ISSCROLLTILED(c) || c->animation.tagouting || c->animation.tagining)) {
+		(workspace_viewport_client(c) || ISSCROLLTILED(c) ||
+		 c->animation.tagouting || c->animation.tagining)) {
 		c->is_clip_to_hide = true;
 		client_update_visibility(c);
 	} else if (c->is_clip_to_hide &&
-			   (VISIBLEON(c, c->mon) || client_gesture_driven(c))) {
+			   (workspace_viewport_client(c) || VISIBLEON(c, c->mon) ||
+				c->animation.tagouting || client_gesture_driven(c))) {
 		c->is_clip_to_hide = false;
 		client_update_visibility(c);
 	}
 
 	return offset;
 }
-void client_set_drop_area(Client *c) {
-	bool first_draw = false;
-	int32_t drop_direction = UNDIR;
-
+/* Shared native drop geometry, also used by the scaled overview hint. */
+bool client_get_drop_area(Client *c, double x, double y, struct wlr_box *box,
+						  int32_t *direction) {
 	if (!c || !c->mon)
-		return;
-
-	if (!c->enable_drop_area_draw && !c->droparea->node.enabled)
-		return;
-
-	if (!c->enable_drop_area_draw && c->droparea->node.enabled) {
-		wlr_scene_node_lower_to_bottom(&c->droparea->node);
-		wlr_scene_node_set_enabled(&c->droparea->node, false);
-		return;
-	} else if (c->enable_drop_area_draw && !c->droparea->node.enabled) {
-		wlr_scene_node_raise_to_top(&c->droparea->node);
-		wlr_scene_node_set_enabled(&c->droparea->node, true);
-		first_draw = true;
-	}
-
+		return false;
 	int32_t bw = (int32_t)c->bw;
 	int32_t client_width = c->geom.width - 2 * bw;
 	int32_t client_height = c->geom.height - 2 * bw;
-
-	if (client_width <= 0 || client_height <= 0) {
-		wlr_scene_node_set_enabled(&c->droparea->node, false);
-		return;
-	}
-
+	if (client_width <= 0 || client_height <= 0)
+		return false;
 	if (server.drop_to_group && server.drop_client == c) {
-		if (!first_draw && c->drop_direction == UNDIR)
-			return;
-		c->drop_direction = UNDIR;
-		wlr_scene_node_set_position(&c->droparea->node, bw, bw);
-		wlr_scene_rect_set_size(c->droparea, client_width, client_height);
-		return;
+		*direction = UNDIR;
+		*box = (struct wlr_box){bw, bw, client_width, client_height};
+		return true;
 	}
-
-	double rel_x = server.cursor->x - c->geom.x - bw;
-	double rel_y = server.cursor->y - c->geom.y - bw;
-
+	int32_t drop_direction = UNDIR;
+	double rel_x = x - c->geom.x - bw;
+	double rel_y = y - c->geom.y - bw;
 	struct wlr_box drop_box;
 	const Layout *cur_layout = c->mon->pertag->ltidxs[get_client_tag_idx(c)];
 	bool dwindle_familiar =
@@ -998,12 +979,35 @@ void client_set_drop_area(Client *c) {
 		}
 	}
 
-	if (!first_draw && c->drop_direction == drop_direction)
-		return;
-	c->drop_direction = drop_direction;
+	*box = drop_box;
+	*direction = drop_direction;
+	return true;
+}
 
-	wlr_scene_node_set_position(&c->droparea->node, drop_box.x, drop_box.y);
-	wlr_scene_rect_set_size(c->droparea, drop_box.width, drop_box.height);
+void client_set_drop_area(Client *c) {
+	if (!c || !c->mon)
+		return;
+	if (!c->enable_drop_area_draw) {
+		if (c->droparea->node.enabled) {
+			wlr_scene_node_lower_to_bottom(&c->droparea->node);
+			wlr_scene_node_set_enabled(&c->droparea->node, false);
+		}
+		return;
+	}
+	struct wlr_box box;
+	int32_t direction;
+	if (!client_get_drop_area(c, server.cursor->x, server.cursor->y, &box,
+							  &direction)) {
+		wlr_scene_node_set_enabled(&c->droparea->node, false);
+		return;
+	}
+	if (!c->droparea->node.enabled) {
+		wlr_scene_node_raise_to_top(&c->droparea->node);
+		wlr_scene_node_set_enabled(&c->droparea->node, true);
+	}
+	c->drop_direction = direction;
+	wlr_scene_node_set_position(&c->droparea->node, box.x, box.y);
+	wlr_scene_rect_set_size(c->droparea, box.width, box.height);
 }
 void client_set_clip(Client *c, float factor) {
 	if (c->iskilling || !client_surface(c)->mapped)
@@ -1228,6 +1232,7 @@ void fadeout_client_animation_next_tick(Client *c) {
 		free(c);
 	}
 }
+
 void client_animation_next_tick(Client *c) {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1513,6 +1518,11 @@ void client_set_pending_state(Client *c) {
 		c->animation.should_animate = false;
 		c->animation.duration = 0;
 	}
+	if (workspace_viewport_client(c)) {
+		c->animation.should_animate = c->animation.running = false;
+		c->animation.tagining = c->animation.tagouting = false;
+		c->animation.current = c->geom;
+	}
 
 	client_commit(c);
 	c->dirty = true;
@@ -1532,7 +1542,8 @@ void resize(Client *c, struct wlr_box geo, ResizeOpts opts) {
 							   : &c->mon->w;
 	struct wlr_box clip;
 
-	if (is_scroller_layout(c->mon) &&
+	const Layout *layout = window_group_layout(window_group_for_client(c));
+	if ((layout->id == SCROLLER || layout->id == VERTICAL_SCROLLER) &&
 		(!c->isfloating || c == server.grab_client)) {
 		c->geom = geo;
 		c->geom.width = MANGO_MAX(1 + 2 * (int32_t)c->bw, c->geom.width);
@@ -1599,7 +1610,7 @@ void resize(Client *c, struct wlr_box geo, ResizeOpts opts) {
 		c->fake_no_border = false;
 	}
 
-	if (!c->mon->isoverview)
+	if (!c->mon->isoverview || c->mon->niri_ov)
 		c->configure_serial =
 			client_set_size(c, c->geom.width - 2 * c->bw,
 							c->geom.height - 2 * c->bw, opts.force_configure);

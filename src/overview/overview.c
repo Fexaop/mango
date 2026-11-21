@@ -98,10 +98,14 @@ void overview_layout_card(Client *c) {
 	if (!c->ov_card_tree)
 		return;
 
-	struct wlr_box geo = c->animation.current;
+	struct wlr_box geo = c->mon && c->mon->niri_ov
+							 ? c->niri_preview_geom
+							 : c->animation.current;
 	if (geo.width <= 0 || geo.height <= 0)
 		client_get_geometry(c, &geo);
-	int32_t bw = (int32_t)c->bw;
+	int32_t bw = c->mon && c->mon->niri_ov
+					 ? (int32_t)c->niri_preview_bw
+					 : (int32_t)c->bw;
 	int32_t w = geo.width - 2 * bw;
 	int32_t h = geo.height - 2 * bw;
 	if (w <= 0 || h <= 0)
@@ -260,6 +264,12 @@ void overview_card_set_corner_radii(Client *c, struct fx_corner_radii corners) {
 		wlr_scene_buffer_set_corner_radii(entry->buffer, corners);
 }
 
+void overview_card_set_opacity(Client *c, float opacity) {
+	struct ov_card_surface *entry;
+	wl_list_for_each(entry, &c->ov_card_surfaces, link)
+		wlr_scene_buffer_set_opacity(entry->buffer, opacity);
+}
+
 // Entering overview: saves and disables the real scene_surface tree and builds
 // an independent card tree to display content.
 void overview_backup_surface(Client *c) {
@@ -349,11 +359,7 @@ void overview_restore(Client *c, const Arg *arg) {
 		client_update_visibility(c);
 	}
 
-	if (c->isfloating) {
-		// XRaiseWindow(display, c->win); // Raise the floating window to the
-		// top
-		resize(c, c->overview_backup_geom, (ResizeOpts){.interact = 0});
-	} else if (c->isfullscreen || c->ismaximizescreen) {
+	if (c->isfullscreen || c->ismaximizescreen) {
 		if (want_restore_fullscreen(c) && c->ismaximizescreen) {
 			client_set_maximize_screen(c, 1, false);
 		} else if (want_restore_fullscreen(c) && c->isfullscreen) {
@@ -363,6 +369,8 @@ void overview_restore(Client *c, const Arg *arg) {
 			client_pending_maximized_state(c, 0);
 			client_set_fullscreen(c, false, false);
 		}
+	} else if (c->isfloating) {
+		resize(c, c->overview_backup_geom, (ResizeOpts){.interact = 0});
 	} else {
 		if (c->is_restoring_from_ov) {
 			c->is_restoring_from_ov = false;

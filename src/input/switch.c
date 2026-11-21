@@ -1,6 +1,7 @@
 #include "mango/input/switch.h"
 #include "mango/common/server.h"
 #include "mango/config/parse.h"
+#include "mango/dispatch/bind.h"
 #include "mango/input/device.h"
 #include "mango/ipc/ipc.h"
 #include <wlr/backend/libinput.h>
@@ -24,7 +25,7 @@ void handle_switch_toggle(struct wl_listener *listener, void *data) {
 			 (s->isdefaultmode && server.key_mode.isdefault) ||
 			 (strcmp(server.key_mode.mode, s->mode) == 0)) &&
 			event->switch_state == s->fold && s->func) {
-			s->func(&s->arg);
+			dispatch_action(s->func, &s->arg);
 			return;
 		}
 	}

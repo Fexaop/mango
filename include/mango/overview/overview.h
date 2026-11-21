@@ -34,6 +34,7 @@ void overview_destroy_card(Client *c);
 
 // Applies rounded corners to all buffer nodes of the card.
 void overview_card_set_corner_radii(Client *c, struct fx_corner_radii corners);
+void overview_card_set_opacity(Client *c, float opacity);
 // Entering overview: saves and disables the real scene_surface tree and builds
 // an independent card tree to display content.
 void overview_backup_surface(Client *c);

@@ -16,6 +16,7 @@ enum {
 	LyrBg,
 	LyrBlur,
 	LyrBottom,
+	LyrOverview, /* niri overview backdrop and workspace previews */
 	LyrTile,
 	LyrMaximize,
 	LyrFloat,

@@ -34,6 +34,7 @@ typedef struct LayerSurface {
 	int32_t no_blur;
 	int32_t no_animation;
 	int32_t no_shadow;
+	int32_t place_within_backdrop;
 	int32_t animation_type_open;
 	int32_t animation_type_close;
 	bool shield_when_capture;

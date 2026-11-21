@@ -19,6 +19,8 @@ typedef struct Arg {
 	Client *tc;
 } Arg;
 
+int32_t dispatch_action(int32_t (*command)(const Arg *), const Arg *arg);
+
 enum { PREV, NEXT };
 enum { MON_PREV = -1, MON_NEXT = -2 };
 enum { FORCE, UNFORCE };
@@ -134,4 +136,5 @@ int32_t toggle_special_tag(const Arg *arg);
 int32_t tag_special_tag(const Arg *arg);
 void toggle_special_tag_mon(Monitor *m);
 int32_t tag_special_silent(const Arg *arg);
+void fix_mon_tagset_from_overview(Monitor *m);
 #endif

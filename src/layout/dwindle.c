@@ -748,10 +748,13 @@ void dwindle(Monitor *m) { dwindle_core(m, NULL); }
 bool dwindle_predict(Monitor *m, Client *c, struct wlr_box *out) {
 	uint32_t tag = get_mon_curtag(m);
 	DwindleNode **root = &m->pertag->dwindle_root[tag];
+	bool existed = dwindle_find_leaf(*root, c) != NULL;
 
 	layout_predict_box(dwindle_core, m, c, out);
 
-	if (dwindle_find_leaf(*root, c))
+	/* A preview of an existing window must preserve its split tree. Only
+	 * undo a temporary insertion made to predict a new window's placement. */
+	if (!existed && dwindle_find_leaf(*root, c))
 		dwindle_remove(root, c);
 
 	return out->width > 0 && out->height > 0;

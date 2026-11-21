@@ -251,6 +251,7 @@ layer_rule=layer_name:Values,Parameter:Values,Parameter:Values
 | `no_blur` | integer | `0` / `1` | Disable blur |
 | `no_animation` | integer | `0` / `1` | Disable layer animation |
 | `no_shadow` | integer | `0` / `1` | Disable layer shadow |
+| `place_within_backdrop` | integer | `0` / `1` | Show a Background-layer surface only behind Niri overview cards, replacing the gray backdrop. Never copied into workspace previews. Default `0`. |
 | `shield_when_capture`| integer | `0` / `1` | Shield layer when captured.(it is better to combination with `no_animation:1`) |
 
 > **Tip:** For animation types, see [Animations](/docs/visuals/animations#animation-types). For visual effects, see [Window Effects](/docs/visuals/effects).

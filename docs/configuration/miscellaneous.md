@@ -42,8 +42,36 @@ description: Advanced settings for XWayland, focus behavior, and system integrat
 | `scratchpad_cross_monitor` | `0` | Share the scratchpad pool across all monitors. |
 | `special_tag_cross_monitor` | `0` | Migrate windows on other monitors' special tags to the monitor where the special tag is activated, copying their special-tag layout. Floating windows are rescaled and centered for the target monitor. |
 | `single_scratchpad` | `1` | Only allow one scratchpad (named or standard) to be visible at a time. |
-| `tag_num` | `9` | Number of tags/workspaces (1–31). On config reload, clients on tags beyond this count are moved to the last tag. |
-| `tag_gather` | `0` | When `1`, occupied tags are compacted to consecutive tags starting at 1, eliminating gaps. For example, with windows on tags 1, 3 and 9, they move to 1, 2 and 3, and the current view follows. |
+| `tag_num` | `9` | Number of tags/workspaces (1–31). On config reload or runtime changes, clients on tags beyond this count are moved to the last tag. |
+| `tag_gather` | `0` | Workspace numbering: `0` keeps fixed tags; `1` gathers tags while retaining an empty active workspace; `2` retains the active workspace and waits for transitions to finish before compacting abandoned empty slots, keeping the focused workspace visually anchored. |
+
+```ini
+# Compact abandoned empty workspaces after arrival; keep an active empty slot.
+tag_gather=2
+```
+
+For example, windows on tags 1, 3, and 9 become workspaces 1, 2, and 3 in
+that order. Viewing the old tag 9 keeps that workspace selected as 3, not 1.
+Changing focus never rotates or reprioritizes occupied workspaces.
+
+All empty workspace numbers after the last occupied one alias a single trailing
+empty workspace. With occupied workspaces 1–4, requests for 5, 6, 7, or 9 all
+target workspace 5, before any animation starts. Repeating an alias during travel
+does not restart the switch. Once workspace 5 contains a window, workspace 6
+becomes the trailing empty destination. Empty workspaces retained in the middle
+keep their existing identity until departure and deferred cleanup.
+
+Closing the last window on workspace 2 keeps that empty workspace in place
+while you remain there. Opening another window refills the same workspace.
+After you switch to workspace 3 and all travel, zoom, and window animations
+finish, the abandoned empty slot is removed and the old workspace 3 becomes 2.
+The focused workspace stays at the same screen position; in overview the other
+workspaces close the gap around it rather than moving the focused card.
+
+Returning to the empty workspace before arrival keeps it. With animations
+disabled, cleanup happens after the destination is applied. Occupied workspaces
+retain their windows and layouts, independently on each monitor; when no windows
+remain, an empty workspace is still available. Set `tag_gather=0` for fixed tags.
 
 ## Window Behavior
 
