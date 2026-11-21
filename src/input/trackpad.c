@@ -18,6 +18,8 @@
 #include "mango/manage/layer.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
+#include "mango/manage/window-group.h"
+#include "mango/overview/niri.h"
 #include "mango/switcher/switcher.h"
 #include <scenefx/types/wlr_scene.h>
 #include <wlr/backend/libinput.h>
@@ -69,7 +71,7 @@ static bool fire_gesture_motion(uint32_t motion, uint32_t fingers) {
 			(g->motion == ALLDIR || motion == g->motion)) {
 			if (g->func == move_resize)
 				continue;
-			g->func(&g->arg);
+			dispatch_action(g->func, &g->arg);
 			handled = true;
 		}
 	}
@@ -89,6 +91,7 @@ static uint32_t swipe_opposite_motion(uint32_t motion) {
 
 #define SWIPE_LOCK_DISTANCE 16
 #define SWIPE_FLICK_MAX_MS 200
+#define SWIPE_FLICK_IDLE_MS 100
 
 struct SwipeDrive {
 	bool active;
@@ -97,11 +100,13 @@ struct SwipeDrive {
 	bool drag;
 	Monitor *mon;
 	uint32_t fingers;
-	Client *start_sel;
+	uint32_t start_sel;
+	uint32_t start_tags;
 	bool horizontal;
 	double base;
 	double dir;
 	double prev_axis;
+	double last_step;
 	double avg_speed;
 	uint32_t speed_points;
 	uint32_t first_time;
@@ -143,11 +148,6 @@ static bool swipe_func_is_view(FuncType func) {
 	return view_opposite_func(func) != NULL;
 }
 
-static bool swipe_func_is_overview(FuncType func) {
-	return func == toggle_overview || func == enter_overview ||
-		   func == leave_overview;
-}
-
 static bool swipe_layout_is_scroller(Monitor *m, bool *vertical) {
 	if (!m || !m->pertag)
 		return false;
@@ -175,6 +175,9 @@ static bool swipe_func_drivable(FuncType func, const Arg *arg, uint32_t motion,
 	if (swipe_func_is_view(func))
 		return true;
 
+	if (func == focus_stack)
+		return swipe_layout_is_scroller(m, NULL);
+
 	if (func == focus_direction) {
 		bool vertical = false;
 		if (!swipe_layout_is_scroller(m, &vertical))
@@ -187,19 +190,20 @@ static bool swipe_func_drivable(FuncType func, const Arg *arg, uint32_t motion,
 	if (func == toggle_overview) {
 		if (motion != SWIPE_UP && motion != SWIPE_DOWN)
 			return false;
-		return m->isoverview ? motion == SWIPE_DOWN : motion == SWIPE_UP;
+		bool open = m->niri_ov ? niri_overview_active(m) : m->isoverview;
+		return open ? motion == SWIPE_DOWN : motion == SWIPE_UP;
 	}
 
 	if (func == enter_overview) {
 		if (motion != SWIPE_UP && motion != SWIPE_DOWN)
 			return false;
-		return !m->isoverview;
+		return m->niri_ov ? !niri_overview_active(m) : !m->isoverview;
 	}
 
 	if (func == leave_overview) {
 		if (motion != SWIPE_UP && motion != SWIPE_DOWN)
 			return false;
-		return m->isoverview;
+		return m->niri_ov ? niri_overview_active(m) : m->isoverview;
 	}
 
 	return false;
@@ -227,6 +231,8 @@ static bool swipe_find_binding(uint32_t motion, uint32_t fingers,
 
 static bool swipe_has_running_transition(Monitor *m) {
 	Client *c = NULL;
+	if (niri_overview_animating(m))
+		return true;
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon != m || !c->animation.running || !c->need_output_flush)
 			continue;
@@ -289,6 +295,8 @@ static double swipe_drive_axis(void) {
 static void swipe_drive_apply(Monitor *m, double p) {
 	Client *c = NULL;
 
+	niri_overview_set_progress(m, p);
+
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon != m || !c->animation.running || !c->need_output_flush)
 			continue;
@@ -310,7 +318,7 @@ static bool swipe_drive_pan_target(Monitor *m, double offset, Client **out) {
 	double mon_cy = m->w.y + m->w.height / 2.0;
 	Client *best = NULL;
 	double best_dist = 0;
-	bool horizontal = swipe_horizontal;
+	bool horizontal = swipe_drive.horizontal;
 
 	Client *c = NULL;
 	wl_list_for_each(c, &server.clients, link) {
@@ -343,7 +351,13 @@ static bool swipe_drive_pan_target(Monitor *m, double offset, Client **out) {
 
 static void swipe_drive_apply_pan(Monitor *m, double offset) {
 	Client *c = NULL;
-	bool horizontal = swipe_horizontal;
+	bool horizontal = swipe_drive.horizontal;
+
+	if (m->niri_ov) {
+		niri_overview_set_pan(m, horizontal ? offset : 0,
+							  horizontal ? 0 : offset);
+		return;
+	}
 
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon != m || !VISIBLEON(c, m) || !ISSCROLLTILED(c))
@@ -370,7 +384,7 @@ static void swipe_drive_apply_pan(Monitor *m, double offset) {
 static double swipe_drive_pan_offset(Monitor *m, double raw) {
 	double lo = 0, hi = 0;
 	bool first = true;
-	bool horizontal = swipe_horizontal;
+	bool horizontal = swipe_drive.horizontal;
 	double mon_center = (horizontal ? m->w.width : m->w.height) / 2.0;
 
 	Client *c = NULL;
@@ -409,7 +423,7 @@ static bool swipe_drive_pan_flick_target(Monitor *m, double dir,
 	if (!m || !m->sel)
 		return false;
 
-	bool horizontal = swipe_horizontal;
+	bool horizontal = swipe_drive.horizontal;
 	double mon_origin = horizontal ? m->w.x : m->w.y;
 	double mon_center = (horizontal ? m->w.width : m->w.height) / 2.0;
 	double sel_center = horizontal ? m->sel->geom.x + m->sel->geom.width / 2.0
@@ -481,7 +495,8 @@ static bool swipe_drive_begin(uint32_t fingers) {
 	swipe_drive.active = false;
 	swipe_drive.pan = false;
 	swipe_drive.drag = false;
-	swipe_drive.start_sel = sel_before;
+	swipe_drive.start_sel = sel_before ? sel_before->id : 0;
+	swipe_drive.start_tags = m->tagset[m->seltags];
 
 	if (drag) {
 		Client *target = m->sel;
@@ -502,7 +517,10 @@ static bool swipe_drive_begin(uint32_t fingers) {
 		return true;
 	}
 
-	if (exec_func == focus_direction) {
+	if (exec_func == focus_direction || exec_func == focus_stack) {
+		bool vertical = false;
+		swipe_layout_is_scroller(m, &vertical);
+		swipe_drive.horizontal = !vertical;
 		swipe_drive.base = axis;
 		swipe_drive.pan = true;
 		swipe_drive.active = true;
@@ -512,10 +530,14 @@ static bool swipe_drive_begin(uint32_t fingers) {
 		return true;
 	}
 
+	bool overview_before = m->niri_ov ? niri_overview_active(m) : m->isoverview;
 	swipe_drive_freeze(m);
-	exec_func(&exec_arg);
+	dispatch_action(exec_func, &exec_arg);
 
-	if (!swipe_has_running_transition(m)) {
+	bool overview_after = m->niri_ov ? niri_overview_active(m) : m->isoverview;
+	if (!swipe_has_running_transition(m) &&
+		m->tagset[m->seltags] == swipe_drive.start_tags &&
+		overview_before == overview_after) {
 		swipe_drive_unfreeze();
 		swipe_drive_log_state(m, "fired but no transition",
 							  m->sel != sel_before, sel_before);
@@ -547,27 +569,15 @@ static bool swipe_drive_fire_opposite(void) {
 		FuncType opposite = view_opposite_func(swipe_drive.func);
 		if (!opposite)
 			return false;
-		opposite(&swipe_drive.arg);
+		dispatch_action(bind_to_view, &(Arg){.ui = swipe_drive.start_tags});
 		swipe_drive.func = opposite;
-	} else if (swipe_drive.func == focus_direction) {
-		Arg a = swipe_drive.arg;
-		if (swipe_drive.motion == SWIPE_LEFT)
-			a.i = RIGHT;
-		else if (swipe_drive.motion == SWIPE_RIGHT)
-			a.i = LEFT;
-		else if (swipe_drive.motion == SWIPE_UP)
-			a.i = DOWN;
-		else
-			a.i = UP;
-		focus_direction(&a);
-		swipe_drive.arg = a;
 	} else if (swipe_drive.func == toggle_overview) {
-		toggle_overview(&swipe_drive.arg);
+		dispatch_action(toggle_overview, &swipe_drive.arg);
 	} else if (swipe_drive.func == enter_overview) {
-		leave_overview(&swipe_drive.arg);
+		dispatch_action(leave_overview, &swipe_drive.arg);
 		swipe_drive.func = leave_overview;
 	} else if (swipe_drive.func == leave_overview) {
-		enter_overview(&swipe_drive.arg);
+		dispatch_action(enter_overview, &swipe_drive.arg);
 		swipe_drive.func = enter_overview;
 	} else {
 		return false;
@@ -617,16 +627,17 @@ static bool swipe_drive_update(uint32_t fingers, uint32_t time) {
 	}
 
 	double axis = swipe_drive_axis();
-	double step = fabs(axis - swipe_drive.prev_axis);
+	double step = axis - swipe_drive.prev_axis;
 	swipe_drive.prev_axis = axis;
-	if (swipe_drive.speed_points < 1000) {
+	if (step != 0) {
 		swipe_drive.avg_speed =
-			(swipe_drive.avg_speed * swipe_drive.speed_points + step) /
+			(swipe_drive.avg_speed * swipe_drive.speed_points + fabs(step)) /
 			(swipe_drive.speed_points + 1);
 		if (swipe_drive.speed_points == 0)
 			swipe_drive.first_time = time;
 		swipe_drive.speed_points++;
 		swipe_drive.last_time = time;
+		swipe_drive.last_step = step;
 	}
 
 	if (!swipe_drive.active) {
@@ -645,9 +656,11 @@ static bool swipe_drive_update(uint32_t fingers, uint32_t time) {
 	double distance = config.gesture_swipe_distance;
 	double delta = (axis - swipe_drive.base) * swipe_drive.dir;
 	double p = delta / distance;
+	if (delta > swipe_drive.max_delta)
+		swipe_drive.max_delta = delta;
 
 	if (swipe_drive.pan) {
-		double extent = swipe_horizontal ? m->w.width : m->w.height;
+		double extent = swipe_drive.horizontal ? m->w.width : m->w.height;
 		double raw = ((axis - swipe_drive.base) / distance) * extent;
 		double offset = swipe_drive_pan_offset(m, raw);
 		swipe_drive_apply_pan(m, offset);
@@ -658,9 +671,6 @@ static bool swipe_drive_update(uint32_t fingers, uint32_t time) {
 		swipe_drive_apply(m, 1.0);
 		return true;
 	}
-
-	if (delta > swipe_drive.max_delta)
-		swipe_drive.max_delta = delta;
 	if (p < 0.0)
 		p = 0.0;
 	if (p > 1.0)
@@ -669,7 +679,16 @@ static bool swipe_drive_update(uint32_t fingers, uint32_t time) {
 	return true;
 }
 
-static void swipe_drive_end(void) {
+static bool swipe_drive_flick(uint32_t time, double delta) {
+	return delta >= SWIPE_LOCK_DISTANCE &&
+		   delta >= swipe_drive.max_delta - SWIPE_LOCK_DISTANCE &&
+		   swipe_drive.last_step * swipe_drive.dir > 0 &&
+		   time - swipe_drive.last_time <= SWIPE_FLICK_IDLE_MS &&
+		   (swipe_drive.avg_speed >= config.gesture_swipe_min_speed_to_force ||
+			time - swipe_drive.first_time <= SWIPE_FLICK_MAX_MS);
+}
+
+static void swipe_drive_end(uint32_t time, bool cancelled) {
 	Monitor *m = swipe_drive.mon;
 
 	if (swipe_drive.drag) {
@@ -686,23 +705,20 @@ static void swipe_drive_end(void) {
 		if (swipe_drive.pan) {
 			double axis = swipe_drive_axis();
 			double distance = config.gesture_swipe_distance;
-			double extent = swipe_horizontal ? m->w.width : m->w.height;
+			double extent = swipe_drive.horizontal ? m->w.width : m->w.height;
 			double raw = ((axis - swipe_drive.base) / distance) * extent;
 			double offset = swipe_drive_pan_offset(m, raw);
 
 			swipe_drive_unfreeze();
 
-			Client *target = NULL;
-			swipe_drive_pan_target(m, offset, &target);
+			Client *start = window_registry_get(swipe_drive.start_sel);
+			Client *target = start;
+			if (!cancelled)
+				swipe_drive_pan_target(m, offset, &target);
 
-			uint32_t dur = swipe_drive.last_time - swipe_drive.first_time;
-			bool speed_hit = swipe_drive.speed_points > 0 &&
-							 swipe_drive.avg_speed >=
-								 config.gesture_swipe_min_speed_to_force;
-			bool quick_hit =
-				swipe_drive.speed_points > 0 && dur <= SWIPE_FLICK_MAX_MS;
-
-			if (target == swipe_drive.start_sel && (speed_hit || quick_hit)) {
+			double delta = (axis - swipe_drive.base) * swipe_drive.dir;
+			if (!cancelled && target == start &&
+				swipe_drive_flick(time, delta)) {
 				double dir = raw < 0 ? -1.0 : 1.0;
 				double flick_offset = offset;
 
@@ -711,7 +727,10 @@ static void swipe_drive_end(void) {
 					offset = flick_offset;
 			}
 
-			if (target && target != swipe_drive.start_sel) {
+			/* Run the same native layout on release, including in overview. */
+			niri_overview_set_pan(m, 0, 0);
+			NiriOverview *edit = niri_overview_begin_edit(m);
+			if (target && target != start) {
 				mango_error(true, WLR_DEBUG,
 							"swipe drive: pan commit, offset=%.0f target=%p\n",
 							offset, (void *)target);
@@ -723,7 +742,7 @@ static void swipe_drive_end(void) {
 						if (c->mon != m || !VISIBLEON(c, m) ||
 							!ISSCROLLTILED(c))
 							continue;
-						if (swipe_horizontal)
+						if (swipe_drive.horizontal)
 							c->geom.x += shift;
 						else
 							c->geom.y += shift;
@@ -737,6 +756,8 @@ static void swipe_drive_end(void) {
 							"swipe drive: pan revert, offset=%.0f\n", offset);
 				arrange(m, false, false);
 			}
+			if (edit)
+				niri_overview_end_edit(edit);
 
 			swipe_drive.active = false;
 			swipe_drive.consumed = false;
@@ -754,15 +775,9 @@ static void swipe_drive_end(void) {
 		if (p > 1.0)
 			p = 1.0;
 
-		uint32_t dur = swipe_drive.last_time - swipe_drive.first_time;
-		bool flick =
-			swipe_drive.speed_points > 0 &&
-			delta >= swipe_drive.max_delta - SWIPE_LOCK_DISTANCE &&
-			(swipe_drive.avg_speed >= config.gesture_swipe_min_speed_to_force ||
-			 dur <= SWIPE_FLICK_MAX_MS);
-		bool commit = swipe_func_is_overview(swipe_drive.func) ||
-					  delta >= distance * config.gesture_swipe_cancel_ratio ||
-					  flick;
+		bool commit = !cancelled &&
+					  (delta >= distance * config.gesture_swipe_cancel_ratio ||
+					   swipe_drive_flick(time, delta));
 
 		swipe_drive_unfreeze();
 
@@ -782,6 +797,7 @@ static void swipe_drive_end(void) {
 
 				client_animation_resume(c, 1.0 - p);
 			}
+			niri_overview_resume(m, 1.0 - p);
 			request_fresh_all_monitors();
 			if (!config.animations)
 				pointer_process_motion(0, NULL, 0, 0, 0, 0);
@@ -851,7 +867,7 @@ void handle_cursor_swipe_end(struct wl_listener *listener, void *data) {
 	}
 
 	bool consumed = swipe_drive.consumed;
-	swipe_drive_end();
+	swipe_drive_end(event->time_msec, event->cancelled);
 
 	if (!consumed && !event->cancelled) {
 		/* No finger-driven transition: keep the previous release-based
