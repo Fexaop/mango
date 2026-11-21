@@ -69,39 +69,41 @@ gesturebind=MODIFIERS,DIRECTION,FINGERS,COMMAND,PARAMETERS
 
 > **Info:** Gestures require proper trackpad configuration. See [Input Devices](/docs/configuration/input) for trackpad settings like `tap_to_click` and `trackpad_disable_while_typing`.
 
-### Drag previews for bound gestures
+### Continuous gestures
 
-`gesture_live=1` shows the transition while dragging for these gesturebind
-commands:
+`gesture_live=1` uses Mango's trackpad driver to follow finger movement. It
+drives workspace transitions, overview zoom, and window panning in horizontal
+and vertical scroller layouts, including inside the zoomed overview.
 
 ```ini
-# right drag -> previous tag
-gesturebind=none,right,4,viewprev_have_client
-# left drag -> next tag
-gesturebind=none,left,4,viewnext_have_client
+gesture_live=1
 
-# swipe up -> overview
-gesturebind=none,up,4,toggleoverview
-# swipe down -> close overview
-gesturebind=none,down,4,toggleoverview
+# Four fingers: open/close overview
+gesturebind=none,up,4,enteroverview
+gesturebind=none,down,4,leaveoverview
+
+# Three fingers: pan through windows; up/down switches tags
+gesturebind=none,left,3,focusstack,next
+gesturebind=none,right,3,focusstack,prev
+gesturebind=none,up,3,viewtoright,0
+gesturebind=none,down,3,viewtoleft,0
 ```
 
-Set `gesture_live=0` to disable previews and act only on release.
+Hold your fingers still to hold the transition; reverse them to move back.
+Release past `gesture_swipe_cancel_ratio` to finish, or use a quick flick.
+Short swipes return to the starting state, and cancelled gestures return even
+after crossing the commit threshold. Scroller windows settle using their native
+layout when you release. In other layouts, `focusstack` changes the selected
+window on release using Mango's normal focus order.
 
-### Examples
+Set `gesture_live=0` to act only on release. See [Input Devices](/docs/configuration/input)
+for distance, cancellation, and flick settings.
+
+The default configuration also keeps four-finger horizontal workspace gestures:
 
 ```ini
-# 3-finger: Window focus
-gesturebind=none,left,3,focusdir,left
-gesturebind=none,right,3,focusdir,right
-gesturebind=none,up,3,focusdir,up
-gesturebind=none,down,3,focusdir,down
-
-# 4-finger: Workspace navigation (right drag -> previous tag, left drag -> next)
 gesturebind=none,right,4,viewprev_have_client
 gesturebind=none,left,4,viewnext_have_client
-gesturebind=none,up,4,toggleoverview
-gesturebind=none,down,4,toggleoverview
 ```
 
 ---
