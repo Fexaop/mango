@@ -49,6 +49,20 @@ static bool client_no_radius_active(const Client *c) {
 		   is_monocle_layout(c->mon);
 }
 
+static bool client_should_snap_scroller_size(Client *c) {
+	if (!c || !c->mon || c->iskilling || c->isfloating || client_is_unmanaged(c) ||
+		c->mon->isoverview || c->ov_card_tree || c->overview_scene_surface ||
+		c->is_pending_open_animation || c->animation.action != MOVE ||
+		c->animation.tagining || c->animation.tagouting ||
+		workspace_viewport_client(c))
+		return false;
+
+	WindowGroup *group = window_group_for_client(c);
+	const Layout *layout = group ? window_group_layout(group) : NULL;
+	return layout &&
+		   (layout->id == SCROLLER || layout->id == VERTICAL_SCROLLER);
+}
+
 bool client_animations_enabled(const Client *c) {
 	if (c && c->no_animation)
 		return false;
@@ -1163,7 +1177,8 @@ void client_set_clip(Client *c, float factor) {
 	buffer_data.height = clip_box.height;
 	buffer_data.corner_location = current_corner_location;
 
-	if (factor == 1.0 && !c->overview_scene_surface) {
+	if ((factor == 1.0 || client_should_snap_scroller_size(c)) &&
+		!c->overview_scene_surface) {
 		buffer_data.width_scale = 1.0;
 		buffer_data.height_scale = 1.0;
 	} else {
@@ -1488,6 +1503,14 @@ void client_commit(Client *c) {
 void client_set_pending_state(Client *c) {
 	if (!c || c->iskilling)
 		return;
+
+	if (client_should_snap_scroller_size(c)) {
+		/* Ordinary scrolling reflows animate position, not client dimensions. */
+		c->current.width = c->animainit_geom.width = c->animation.initial.width =
+			c->animation.current.width = c->pending.width;
+		c->current.height = c->animainit_geom.height = c->animation.initial.height =
+			c->animation.current.height = c->pending.height;
+	}
 
 	if (!client_animations_enabled(c))
 		c->animation.should_animate = false;

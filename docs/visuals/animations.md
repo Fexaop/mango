@@ -73,6 +73,19 @@ animation_duration_close=300
 animation_duration_focus=0
 ```
 
+In `scroller` and `vertical_scroller`, ordinary tiled layout changes snap window
+width and height to their destination while x/y movement remains animated.
+This includes proportion changes and maximize/restore, both normally and inside
+Niri-style overview. Overview previews keep their zoom scale without stretching
+through intermediate sizes. `animation_duration_move` and `animation_curve_move`
+still control the positional transition.
+Adjacent windows retain their native content scale as they slide across output
+edges.
+
+Opening/closing effects, overview zoom, workspace transitions, floating windows,
+and other layouts retain their existing animation behavior. Client repaint timing
+remains asynchronous; scrolling reflows do not request intermediate client sizes.
+
 ## Custom Bezier Curves
 
 Bezier curves determine the "feel" of an animation (e.g., linear vs. bouncy). The format is `x1,y1,x2,y2`.
